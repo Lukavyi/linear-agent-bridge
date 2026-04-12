@@ -48,7 +48,6 @@ const RECENT_KEY_TTL_MS = 6 * 60 * 60 * 1000;
 const ACTIVITY_RETRY_DELAYS_MS = [0, 250, 1000, 2500];
 const BOOTSTRAP_DEBOUNCE_MS = 2000;
 const BOOTSTRAP_DUPLICATE_WINDOW_MS = 5000;
-const PROMPTED_DEBOUNCE_MS = 1000;
 const PROMPTED_DUPLICATE_WINDOW_MS = 5000;
 
 const sessionQueues = new Map<string, Promise<void>>();
@@ -57,9 +56,6 @@ const recentTerminalKeys = new Map<string, number>();
 const recentSessionCreatedAt = new Map<string, number>();
 const recentBootstrapCommentRunsAt = new Map<string, number>();
 const recentPromptedSessionRunsAt = new Map<string, number>();
-const recentPromptedCommentRunsAt = new Map<string, number>();
-const recentPromptedSessionBySessionAt = new Map<string, number>();
-const recentPromptedCommentBySessionAt = new Map<string, number>();
 const sessionRunStates = new Map<string, SessionRunState>();
 
 interface SessionRunState {
@@ -178,6 +174,13 @@ async function processWebhook(
     return;
   }
 
+  if (shouldIgnoreNativeCommentTrigger(payload, trigger)) {
+    api.logger.info?.(
+      `linear runtime: ignored native comment trigger session=${trigger.sessionId} action=${trigger.action}`,
+    );
+    return;
+  }
+
   const bootstrapCommentCandidate = isBootstrapCommentCandidate(payload, trigger);
   if (trigger.action === "created") {
     if (hasFreshSessionMarker(recentBootstrapCommentRunsAt, trigger.sessionId)) {
@@ -260,6 +263,15 @@ export function isBootstrapCommentCandidate(
   return !parentId;
 }
 
+export function shouldIgnoreNativeCommentTrigger(
+  payload: Record<string, unknown>,
+  trigger: LinearTrigger,
+): boolean {
+  if (trigger.source !== "comment") return false;
+  if (payload.isArtificialAgentSessionRoot === true) return false;
+  return Boolean(trigger.sessionId);
+}
+
 function isCommentCreate(payload: Record<string, unknown>): boolean {
   const action = (readString(payload.action) ?? "").toLowerCase();
   return action === "create" || action === "created";
@@ -275,40 +287,15 @@ export function buildPromptedDuplicateKey(
   return `${trigger.sessionId}:${digest}`;
 }
 
-export async function shouldSkipPromptedDuplicate(
-  trigger: LinearTrigger,
+export function shouldSkipPromptedDuplicate(
+  _trigger: LinearTrigger,
   duplicateKey: string,
-): Promise<boolean> {
-  if (trigger.source === "agent-session") {
-    const shouldSkip =
-      hasFreshPromptedMarker(recentPromptedCommentRunsAt, duplicateKey) ||
-      hasFreshPromptedMarker(
-        recentPromptedCommentBySessionAt,
-        trigger.sessionId,
-      );
-    markPromptedMarker(recentPromptedSessionRunsAt, duplicateKey);
-    markPromptedMarker(recentPromptedSessionBySessionAt, trigger.sessionId);
-    return shouldSkip;
-  }
-
-  if (
-    hasFreshPromptedMarker(recentPromptedSessionRunsAt, duplicateKey) ||
-    hasFreshPromptedMarker(recentPromptedSessionBySessionAt, trigger.sessionId)
-  ) {
+): boolean {
+  if (hasFreshPromptedMarker(recentPromptedSessionRunsAt, duplicateKey)) {
     return true;
   }
 
-  await sleep(PROMPTED_DEBOUNCE_MS);
-
-  if (
-    hasFreshPromptedMarker(recentPromptedSessionRunsAt, duplicateKey) ||
-    hasFreshPromptedMarker(recentPromptedSessionBySessionAt, trigger.sessionId)
-  ) {
-    return true;
-  }
-
-  markPromptedMarker(recentPromptedCommentRunsAt, duplicateKey);
-  markPromptedMarker(recentPromptedCommentBySessionAt, trigger.sessionId);
+  markPromptedMarker(recentPromptedSessionRunsAt, duplicateKey);
   return false;
 }
 
@@ -340,9 +327,6 @@ function markPromptedMarker(
 
 export function resetPromptedDuplicateState(): void {
   recentPromptedSessionRunsAt.clear();
-  recentPromptedCommentRunsAt.clear();
-  recentPromptedSessionBySessionAt.clear();
-  recentPromptedCommentBySessionAt.clear();
 }
 
 function hasFreshSessionMarker(
