@@ -1,5 +1,9 @@
 # linear-agent-bridge
 
+[![Linear to OpenClaw session mapping demo](./media/linear-agent-sessions-demo.gif)](./media/linear-agent-sessions-demo.mp4)
+
+Full demo video: [`media/linear-agent-sessions-demo.mp4`](./media/linear-agent-sessions-demo.mp4)
+
 An OpenClaw plugin that maps each Linear Agent Session to its own persistent OpenClaw conversation.
 
 One Linear issue can contain many separate Agent Sessions, and each of those sessions maps to a separate OpenClaw session key. That means you can create as many independent agent threads as you want inside the same issue without mixing their context.
