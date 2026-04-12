@@ -178,6 +178,13 @@ async function processWebhook(
     return;
   }
 
+  if (shouldIgnoreNativeCommentTrigger(payload, trigger)) {
+    api.logger.info?.(
+      `linear runtime: ignored native comment trigger session=${trigger.sessionId} action=${trigger.action}`,
+    );
+    return;
+  }
+
   const bootstrapCommentCandidate = isBootstrapCommentCandidate(payload, trigger);
   if (trigger.action === "created") {
     if (hasFreshSessionMarker(recentBootstrapCommentRunsAt, trigger.sessionId)) {
@@ -258,6 +265,15 @@ export function isBootstrapCommentCandidate(
     readString(payload.parentId) ??
     "";
   return !parentId;
+}
+
+export function shouldIgnoreNativeCommentTrigger(
+  payload: Record<string, unknown>,
+  trigger: LinearTrigger,
+): boolean {
+  if (trigger.source !== "comment") return false;
+  if (payload.isArtificialAgentSessionRoot === true) return false;
+  return Boolean(trigger.sessionId);
 }
 
 function isCommentCreate(payload: Record<string, unknown>): boolean {

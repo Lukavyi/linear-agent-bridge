@@ -7,6 +7,7 @@ import {
   isBootstrapCommentCandidate,
   resetPromptedDuplicateState,
   shouldAllowSelfAuthoredBootstrap,
+  shouldIgnoreNativeCommentTrigger,
   shouldSkipPromptedDuplicate,
 } from "./handler.js";
 
@@ -119,6 +120,51 @@ test("does not treat replies or artificial roots as bootstrap comment candidates
         action: "create",
         isArtificialAgentSessionRoot: true,
         comment: { parentId: null },
+      },
+      trigger,
+    ),
+    false,
+  );
+});
+
+test("ignores normal native-session comment triggers but keeps artificial bootstrap comments", () => {
+  const trigger = {
+    source: "comment" as const,
+    action: "prompted" as const,
+    sessionId: "sess",
+    kind: "Comment",
+    eventKey: "key",
+    webhookId: "",
+    deliveryId: "",
+    signal: "",
+    prompt: "hi",
+    promptContext: "",
+    guidance: "",
+    issueId: "issue",
+    issueIdentifier: "LUK-770",
+    issueTitle: "Feature",
+    issueDescription: "",
+    issueUrl: "",
+    teamKey: "",
+    projectKey: "",
+    commentId: "comment",
+    activityId: "",
+  };
+
+  assert.equal(
+    shouldIgnoreNativeCommentTrigger(
+      { type: "Comment", action: "create" },
+      trigger,
+    ),
+    true,
+  );
+
+  assert.equal(
+    shouldIgnoreNativeCommentTrigger(
+      {
+        type: "Comment",
+        action: "create",
+        isArtificialAgentSessionRoot: true,
       },
       trigger,
     ),
