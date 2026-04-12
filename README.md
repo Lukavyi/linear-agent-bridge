@@ -14,6 +14,7 @@ This repo is for the plugin runtime itself. It is not a full infrastructure guid
 - Posts a fast visible `thought` activity as an acknowledgement
 - Runs one OpenClaw turn for each accepted Linear turn
 - Publishes exactly one final visible `response` or `error`
+- Uses `AgentSessionEvent` as the canonical trigger for native Linear session runs
 - Deduplicates known duplicate webhook combinations
 - Supports OAuth callback and code exchange routes for app installation
 - Optionally publishes post-run tool/file trace breadcrumbs when `linearDebugToolTrace=true`
@@ -51,7 +52,9 @@ High level flow:
 5. The plugin runs one OpenClaw turn against that stable session key.
 6. The plugin publishes exactly one terminal `response` or `error`.
 
-For comment-shaped follow-ups, the runtime may resolve the session through fallback lookup logic, but the intended source of truth is the native Linear session/activity flow.
+For native Linear agent sessions, `AgentSessionEvent` is the canonical runtime trigger.
+
+Comment webhooks may still be used for bootstrap/fallback lookup in edge cases, but normal comment events tied to an existing native agent session are ignored so one user turn cannot start a second run.
 
 ## Session model on normal-human terms
 

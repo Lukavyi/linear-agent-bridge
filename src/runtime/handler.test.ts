@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { setTimeout as delay } from "node:timers/promises";
 
 import {
   buildPromptedDuplicateKey,
@@ -208,56 +207,17 @@ test("prompted duplicate key matches for equivalent session and prompt", () => {
   );
 });
 
-test("skips prompted comment duplicate when agent-session event already arrived", async () => {
+test("skips repeated prompted events with the same duplicate key", () => {
   resetPromptedDuplicateState();
   const sessionTrigger = makePromptedTrigger("agent-session");
-  const commentTrigger = makePromptedTrigger("comment");
   const duplicateKey = buildPromptedDuplicateKey(sessionTrigger);
 
   assert.equal(
-    await shouldSkipPromptedDuplicate(sessionTrigger, duplicateKey),
+    shouldSkipPromptedDuplicate(sessionTrigger, duplicateKey),
     false,
   );
   assert.equal(
-    await shouldSkipPromptedDuplicate(commentTrigger, duplicateKey),
-    true,
-  );
-});
-
-test("skips prompted comment duplicate when agent-session event arrives during debounce", async () => {
-  resetPromptedDuplicateState();
-  const sessionTrigger = makePromptedTrigger("agent-session");
-  const commentTrigger = makePromptedTrigger("comment");
-  const duplicateKey = buildPromptedDuplicateKey(sessionTrigger);
-
-  const pendingComment = shouldSkipPromptedDuplicate(commentTrigger, duplicateKey);
-  await delay(25);
-  assert.equal(
-    await shouldSkipPromptedDuplicate(sessionTrigger, duplicateKey),
-    false,
-  );
-  assert.equal(await pendingComment, true);
-});
-
-test("skips prompted comment duplicate for same session even when keys differ", async () => {
-  resetPromptedDuplicateState();
-  const sessionTrigger = makePromptedTrigger("agent-session");
-  const commentTrigger = makePromptedTrigger("comment");
-  commentTrigger.prompt = "same turn rendered differently";
-  commentTrigger.promptContext = "with screenshot and history noise";
-
-  assert.equal(
-    await shouldSkipPromptedDuplicate(
-      sessionTrigger,
-      buildPromptedDuplicateKey(sessionTrigger),
-    ),
-    false,
-  );
-  assert.equal(
-    await shouldSkipPromptedDuplicate(
-      commentTrigger,
-      buildPromptedDuplicateKey(commentTrigger),
-    ),
+    shouldSkipPromptedDuplicate(sessionTrigger, duplicateKey),
     true,
   );
 });
