@@ -4,17 +4,20 @@ export function normalizeCfg(
   input: Record<string, unknown> | undefined,
 ): PluginConfig {
   const cfg = input ?? {};
+  const agentId = readCfgString(cfg, "agentId");
   return {
+    agentId,
     devAgentId: readCfgString(cfg, "devAgentId"),
+    openclawProvider: readCfgString(cfg, "openclawProvider"),
+    openclawModel: readCfgString(cfg, "openclawModel"),
+    openclawThinking: readCfgString(cfg, "openclawThinking"),
+    linearDebugToolTrace: readCfgBool(cfg, "linearDebugToolTrace"),
     linearWebhookSecret: readCfgString(cfg, "linearWebhookSecret"),
     linearApiKey: readCfgString(cfg, "linearApiKey"),
     linearOauthClientId: readCfgString(cfg, "linearOauthClientId"),
     linearOauthClientSecret: readCfgString(cfg, "linearOauthClientSecret"),
     linearOauthRedirectUri: readCfgString(cfg, "linearOauthRedirectUri"),
     linearTokenStorePath: readCfgString(cfg, "linearTokenStorePath"),
-    notifyChannel: readCfgString(cfg, "notifyChannel"),
-    notifyTo: readCfgString(cfg, "notifyTo"),
-    notifyAccountId: readCfgString(cfg, "notifyAccountId"),
     repoByTeam: readCfgMap(cfg, "repoByTeam"),
     repoByProject: readCfgMap(cfg, "repoByProject"),
     defaultDir: readCfgString(cfg, "defaultDir"),
@@ -22,12 +25,6 @@ export function normalizeCfg(
     startOnCreate: readCfgBool(cfg, "startOnCreate"),
     externalUrlBase: readCfgString(cfg, "externalUrlBase"),
     externalUrlLabel: readCfgString(cfg, "externalUrlLabel"),
-    enableAgentApi: readCfgBool(cfg, "enableAgentApi"),
-    apiBaseUrl: readCfgString(cfg, "apiBaseUrl"),
-    strictAddressing: readCfgBool(cfg, "strictAddressing"),
-    mentionHandle: readCfgString(cfg, "mentionHandle"),
-    apiCorsOrigins: readCfgStringArray(cfg, "apiCorsOrigins"),
-    apiCorsAllowCredentials: readCfgBool(cfg, "apiCorsAllowCredentials"),
   };
 }
 
@@ -66,16 +63,3 @@ function readCfgMap(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-
-function readCfgStringArray(
-  cfg: Record<string, unknown>,
-  key: string,
-): string[] | undefined {
-  const raw = cfg[key];
-  if (!Array.isArray(raw)) return undefined;
-  const values = raw
-    .filter((v): v is string => typeof v === "string")
-    .map((v) => v.trim())
-    .filter(Boolean);
-  return values.length > 0 ? values : undefined;
-}

@@ -1,14 +1,34 @@
 {
   "id": "linear-agent-bridge",
   "name": "Linear",
-  "description": "Linear agent webhook bridge for OpenClaw dev runs",
+  "description": "Linear conversational bridge for the OpenClaw main agent",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "agentId": {
+        "type": "string",
+        "description": "OpenClaw agent ID to use for Linear sessions (default: 'main')"
+      },
       "devAgentId": {
         "type": "string",
-        "description": "Agent ID to handle Linear issues (default: 'dev')"
+        "description": "Legacy alias for agentId"
+      },
+      "openclawProvider": {
+        "type": "string",
+        "description": "Gateway provider override for Linear turns (default: 'openai')"
+      },
+      "openclawModel": {
+        "type": "string",
+        "description": "Gateway model override for Linear turns (default: 'gpt-5.4')"
+      },
+      "openclawThinking": {
+        "type": "string",
+        "description": "Gateway thinking level for Linear turns (default: 'high')"
+      },
+      "linearDebugToolTrace": {
+        "type": "boolean",
+        "description": "When enabled, publish visible tool/file trace breadcrumbs in Linear activities after each run."
       },
       "linearWebhookSecret": {
         "type": "string",
@@ -110,9 +130,28 @@
     }
   },
   "uiHints": {
+    "agentId": {
+      "label": "Agent ID",
+      "placeholder": "main"
+    },
     "linearWebhookSecret": {
       "label": "Webhook secret",
       "sensitive": true
+    },
+    "openclawProvider": {
+      "label": "Provider override",
+      "placeholder": "openai"
+    },
+    "openclawModel": {
+      "label": "Model override",
+      "placeholder": "gpt-5.4"
+    },
+    "openclawThinking": {
+      "label": "Thinking level",
+      "placeholder": "high"
+    },
+    "linearDebugToolTrace": {
+      "label": "Debug tool trace"
     },
     "linearApiKey": {
       "label": "API key / OAuth token",
