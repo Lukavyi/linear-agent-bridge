@@ -24,7 +24,7 @@ export async function callLinear(
   }
   if (!token) {
     warnMissingApiKey(api);
-    return { ok: false };
+    return { ok: false, error: "missing_api_key" };
   }
   let res = await fetch(LINEAR_API_URL, {
     method: "POST",
@@ -57,18 +57,18 @@ export async function callLinear(
 
   if (!res) {
     api.logger.warn?.(`linear ${label} failed: fetch error`);
-    return { ok: false };
+    return { ok: false, error: "fetch error" };
   }
   if (!res.ok) {
     const detail = await res.text();
     api.logger.warn?.(`linear ${label} failed (${res.status}): ${detail}`);
-    return { ok: false };
+    return { ok: false, status: res.status, error: detail };
   }
   const json = await res.json().catch(() => null);
   const root = readObject(json);
   if (!root) {
     api.logger.warn?.(`linear ${label} invalid response`);
-    return { ok: false };
+    return { ok: false, error: "invalid response" };
   }
   const errors = root.errors;
   if (Array.isArray(errors) && errors.length > 0) {
@@ -77,12 +77,12 @@ export async function callLinear(
       .filter(Boolean)
       .join("; ");
     api.logger.warn?.(`linear ${label} failed: ${detail}`);
-    return { ok: false };
+    return { ok: false, error: detail };
   }
   const data = readObject(root.data);
   if (!data) {
     api.logger.warn?.(`linear ${label} missing data`);
-    return { ok: false };
+    return { ok: false, error: "missing data" };
   }
   return { ok: true, data };
 }

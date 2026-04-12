@@ -1,7 +1,7 @@
 {
   "name": "linear-agent-bridge",
   "version": "0.1.2",
-  "description": "Linear agent webhook integration for OpenClaw",
+  "description": "Linear conversational bridge for the OpenClaw main agent",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,6 +12,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test dist/src/**/*.test.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

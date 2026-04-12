@@ -6,32 +6,7 @@ export const ISSUE_INFO_QUERY = `
       id
       state { type }
       team { id }
-      delegate { id }
-    }
-  }
-`;
-
-export const ISSUE_DETAIL_QUERY = `
-  query IssueDetail($id: String!) {
-    issue(id: $id) {
-      id
-      identifier
-      title
-      description
-      url
-      priority
-      priorityLabel
-      state { id name type }
-      team { id key name }
-      assignee { id name displayName }
-      delegate { id name displayName }
-      labels { nodes { id name color } }
-      parent { id identifier title }
-      children { nodes { id identifier title state { type } } }
-      relations { nodes { id type relatedIssue { id identifier title } } }
-      comments(first: 20) {
-        nodes { id body createdAt user { id name displayName } }
-      }
+      delegate { id name }
     }
   }
 `;
@@ -52,19 +27,6 @@ export const TEAM_COMPLETED_QUERY = `
       states(filter: { type: { eq: "completed" } }) {
         nodes { id position }
       }
-    }
-  }
-`;
-
-export const TEAM_DETAIL_QUERY = `
-  query TeamDetail($id: String!) {
-    team(id: $id) {
-      id
-      key
-      name
-      states { nodes { id name type position } }
-      labels { nodes { id name color } }
-      members { nodes { id name displayName } }
     }
   }
 `;
@@ -90,21 +52,6 @@ export const COMMENT_SESSION_QUERY = `
   }
 `;
 
-export const COMMENT_THREAD_NODE_QUERY = `
-  query CommentThreadNode($id: String!) {
-    comment(id: $id) {
-      id
-      body
-      parentId
-      parent {
-        id
-        body
-        parentId
-      }
-    }
-  }
-`;
-
 export const ISSUE_SESSION_QUERY = `
   query IssueSession($id: String!) {
     issue(id: $id) {
@@ -122,21 +69,40 @@ export const ISSUE_SESSION_QUERY = `
   }
 `;
 
-export const REPO_SUGGESTIONS_QUERY = `
-  query RepoSuggestions(
-    $issueId: String!,
-    $agentSessionId: String!,
-    $candidateRepositories: [CandidateRepositoryInput!]!
-  ) {
-    issueRepositorySuggestions(
-      issueId: $issueId
-      agentSessionId: $agentSessionId
-      candidateRepositories: $candidateRepositories
-    ) {
-      suggestions {
-        repositoryFullName
-        hostname
-        confidence
+export const AGENT_SESSION_ACTIVITIES_QUERY = `
+  query AgentSessionActivities($id: String!) {
+    agentSession(id: $id) {
+      id
+      activities {
+        edges {
+          node {
+            id
+            updatedAt
+            content {
+              __typename
+              ... on AgentActivityThoughtContent {
+                body
+              }
+              ... on AgentActivityActionContent {
+                action
+                parameter
+                result
+              }
+              ... on AgentActivityElicitationContent {
+                body
+              }
+              ... on AgentActivityResponseContent {
+                body
+              }
+              ... on AgentActivityErrorContent {
+                body
+              }
+              ... on AgentActivityPromptContent {
+                body
+              }
+            }
+          }
+        }
       }
     }
   }

@@ -16,20 +16,23 @@ export interface OpenClawPluginApi {
       req: IncomingMessage,
       res: ServerResponse,
     ) => void | Promise<void>;
+    auth?: "plugin" | "gateway";
   }) => void;
 }
 
 export interface PluginConfig {
+  agentId?: string;
   devAgentId?: string;
+  openclawProvider?: string;
+  openclawModel?: string;
+  openclawThinking?: string;
+  linearDebugToolTrace?: boolean;
   linearWebhookSecret?: string;
   linearApiKey?: string;
   linearOauthClientId?: string;
   linearOauthClientSecret?: string;
   linearOauthRedirectUri?: string;
   linearTokenStorePath?: string;
-  notifyChannel?: string;
-  notifyTo?: string;
-  notifyAccountId?: string;
   repoByTeam?: Record<string, string>;
   repoByProject?: Record<string, string>;
   defaultDir?: string;
@@ -37,14 +40,7 @@ export interface PluginConfig {
   startOnCreate?: boolean;
   externalUrlBase?: string;
   externalUrlLabel?: string;
-  enableAgentApi?: boolean;
-  apiBaseUrl?: string;
-  strictAddressing?: boolean;
-  mentionHandle?: string;
-  apiCorsOrigins?: string[];
-  apiCorsAllowCredentials?: boolean;
 }
-
 
 export type ActivityType =
   | "thought"
@@ -61,30 +57,11 @@ export interface ActivityContent {
   result?: string;
 }
 
-export interface ActivityOptions {
-  signal?: string;
-  signalMeta?: Record<string, unknown>;
-  ephemeral?: boolean;
-}
-
-export interface PlanStep {
-  content: string;
-  status: "pending" | "inProgress" | "completed" | "canceled";
-}
-
-export interface SessionContext {
-  sessionId: string;
-  issueId: string;
-  issueIdentifier: string;
-  issueTitle: string;
-  issueUrl: string;
-  teamId: string;
-  apiToken: string;
-}
-
 export interface LinearCallResult {
   ok: boolean;
   data?: Record<string, unknown>;
+  status?: number;
+  error?: string;
 }
 
 export type ReadBodyResult =

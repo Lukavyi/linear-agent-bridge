@@ -9,6 +9,20 @@ import { readArray, readObject, readString, sleep } from "../util.js";
 const sessionByIssueRef: Record<string, string> = {};
 const sessionByCommentRef: Record<string, string> = {};
 
+export function rememberResolvedSessionHint(
+  input: {
+    issueId?: string;
+    commentId?: string;
+    parentId?: string;
+  },
+  sessionId: string,
+): void {
+  if (!sessionId) return;
+  if (input.issueId) sessionByIssueRef[input.issueId] = sessionId;
+  if (input.commentId) sessionByCommentRef[input.commentId] = sessionId;
+  if (input.parentId) sessionByCommentRef[input.parentId] = sessionId;
+}
+
 export function resolveSessionId(
   data: Record<string, unknown>,
 ): string {
@@ -37,20 +51,25 @@ export function rememberSessionHint(
   data: Record<string, unknown>,
   sessionId: string,
 ): void {
-  if (!sessionId) return;
   const issue = resolveIssue(data);
   const issueId =
     readString(issue?.id) ?? readString(data.issueId as string) ?? "";
-  if (issueId) sessionByIssueRef[issueId] = sessionId;
   const comment = readObject(data.comment);
   const cid =
     readString(comment?.id) ?? readString(data.id as string) ?? "";
-  if (cid) sessionByCommentRef[cid] = sessionId;
   const parentId =
     readString(comment?.parentId) ??
     readString(data.parentId as string) ??
     "";
-  if (parentId) sessionByCommentRef[parentId] = sessionId;
+
+  rememberResolvedSessionHint(
+    {
+      issueId,
+      commentId: cid,
+      parentId,
+    },
+    sessionId,
+  );
 }
 
 export async function resolveSessionIdWithFallback(
@@ -66,15 +85,14 @@ export async function resolveSessionIdWithFallback(
   const kind = readString(data.type as string) ?? "";
   if (kind !== "Comment") return "";
 
+  const action = (readString(data.action as string) ?? "").toLowerCase();
+  const isCreate = action === "create" || action === "created";
   const comment = readObject(data.comment);
   const issueId =
     readString(resolveIssue(data)?.id) ??
     readString(data.issueId as string) ??
     readString(comment?.issueId as string) ??
     "";
-  if (issueId && sessionByIssueRef[issueId]) {
-    return sessionByIssueRef[issueId];
-  }
   const commentId =
     readString(comment?.id) ?? readString(data.id as string) ?? "";
   if (commentId && sessionByCommentRef[commentId]) {
@@ -104,6 +122,12 @@ export async function resolveSessionIdWithFallback(
   if (viaComment) {
     rememberSessionHint({ ...data, parentId }, viaComment);
     return viaComment;
+  }
+  if (isCreate && !parentId) {
+    return "";
+  }
+  if (issueId && sessionByIssueRef[issueId]) {
+    return sessionByIssueRef[issueId];
   }
   if (!issueId) return "";
   const viaIssue = await resolveSessionFromIssue(api, cfg, issueId);
