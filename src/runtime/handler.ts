@@ -23,6 +23,7 @@ import {
 } from "../util.js";
 import { applyIssuePolicy } from "./issue-policy.js";
 import {
+  bootstrapSessionOnComment,
   rememberResolvedSessionHint,
   resolveSessionIdWithFallback,
 } from "./session-resolver.js";
@@ -49,6 +50,8 @@ const ACTIVITY_RETRY_DELAYS_MS = [0, 250, 1000, 2500];
 const BOOTSTRAP_DEBOUNCE_MS = 2000;
 const BOOTSTRAP_DUPLICATE_WINDOW_MS = 5000;
 const PROMPTED_DUPLICATE_WINDOW_MS = 5000;
+const COMMENT_PROMPT_HINT_TTL_MS = 2 * 60 * 1000;
+const MISSING_PROMPT_HINT_DELAYS_MS = [0, 250, 500, 1000];
 
 const sessionQueues = new Map<string, Promise<void>>();
 const recentEventKeys = new Map<string, number>();
@@ -56,7 +59,14 @@ const recentTerminalKeys = new Map<string, number>();
 const recentSessionCreatedAt = new Map<string, number>();
 const recentBootstrapCommentRunsAt = new Map<string, number>();
 const recentPromptedSessionRunsAt = new Map<string, number>();
+const recentCommentPromptHints = new Map<string, PromptHint>();
 const sessionRunStates = new Map<string, SessionRunState>();
+
+interface PromptHint {
+  text: string;
+  commentId: string;
+  recordedAt: number;
+}
 
 interface SessionRunState {
   nextRunId: number;
@@ -174,6 +184,8 @@ async function processWebhook(
     return;
   }
 
+  rememberCommentPromptHint(trigger, payload);
+
   if (shouldIgnoreNativeCommentTrigger(payload, trigger)) {
     api.logger.info?.(
       `linear runtime: ignored native comment trigger session=${trigger.sessionId} action=${trigger.action}`,
@@ -269,6 +281,7 @@ export function shouldIgnoreNativeCommentTrigger(
 ): boolean {
   if (trigger.source !== "comment") return false;
   if (payload.isArtificialAgentSessionRoot === true) return false;
+  if (payload.fallbackAgentSessionBootstrap === true) return false;
   return Boolean(trigger.sessionId);
 }
 
@@ -329,6 +342,76 @@ export function resetPromptedDuplicateState(): void {
   recentPromptedSessionRunsAt.clear();
 }
 
+export function resetCommentPromptHintState(): void {
+  recentCommentPromptHints.clear();
+}
+
+export function rememberCommentPromptHint(
+  trigger: LinearTrigger,
+  payload: Record<string, unknown>,
+): void {
+  if (trigger.source !== "comment") return;
+  const text = extractCommentPromptHintText(trigger, payload);
+  if (!text) return;
+  pruneCommentPromptHints();
+  recentCommentPromptHints.set(trigger.sessionId, {
+    text,
+    commentId: trigger.commentId,
+    recordedAt: Date.now(),
+  });
+}
+
+export async function hydrateTriggerPromptFromCommentHint(
+  trigger: LinearTrigger,
+  delaysMs: number[] = MISSING_PROMPT_HINT_DELAYS_MS,
+): Promise<LinearTrigger> {
+  if (trigger.action !== "prompted") return trigger;
+  if (trigger.prompt.trim()) return trigger;
+
+  for (let index = 0; index < delaysMs.length; index += 1) {
+    const delayMs = delaysMs[index] ?? 0;
+    if (delayMs > 0) await sleep(delayMs);
+    const hint = consumeFreshCommentPromptHint(trigger.sessionId);
+    if (!hint) continue;
+    return {
+      ...trigger,
+      prompt: hint.text,
+      commentId: trigger.commentId || hint.commentId,
+    };
+  }
+
+  return trigger;
+}
+
+function extractCommentPromptHintText(
+  trigger: LinearTrigger,
+  payload: Record<string, unknown>,
+): string {
+  const text =
+    trigger.prompt.trim() ||
+    readString(readObject(payload.comment)?.body)?.trim() ||
+    readString(payload.body)?.trim() ||
+    "";
+  return text;
+}
+
+function consumeFreshCommentPromptHint(sessionId: string): PromptHint | undefined {
+  pruneCommentPromptHints();
+  const hint = recentCommentPromptHints.get(sessionId);
+  if (!hint) return undefined;
+  recentCommentPromptHints.delete(sessionId);
+  return hint;
+}
+
+function pruneCommentPromptHints(): void {
+  const cutoff = Date.now() - COMMENT_PROMPT_HINT_TTL_MS;
+  for (const [key, value] of recentCommentPromptHints.entries()) {
+    if (value.recordedAt < cutoff) {
+      recentCommentPromptHints.delete(key);
+    }
+  }
+}
+
 function hasFreshSessionMarker(
   store: Map<string, number>,
   sessionId: string,
@@ -367,7 +450,12 @@ async function resolveCommentSession(
     const sessionId = await resolveSessionIdWithFallback(api, cfg, payload);
     if (sessionId) return sessionId;
   }
-  return "";
+
+  const bootstrappedSessionId = await bootstrapSessionOnComment(api, cfg, payload);
+  if (bootstrappedSessionId) {
+    payload.fallbackAgentSessionBootstrap = true;
+  }
+  return bootstrappedSessionId;
 }
 
 function enqueueSessionTurn(
@@ -404,8 +492,14 @@ async function handleStopSignal(
 async function executeTurn(
   api: OpenClawPluginApi,
   cfg: PluginConfig,
-  trigger: LinearTrigger,
+  inputTrigger: LinearTrigger,
 ): Promise<void> {
+  const trigger = await hydrateTriggerPromptFromCommentHint(inputTrigger);
+  if (!inputTrigger.prompt.trim() && trigger.prompt.trim()) {
+    api.logger.info?.(
+      `linear runtime: hydrated missing prompt from comment hint session=${trigger.sessionId}`,
+    );
+  }
   const state = getSessionRunState(trigger.sessionId);
   const runId = state.nextRunId + 1;
   state.nextRunId = runId;
@@ -741,6 +835,8 @@ function buildLabel(trigger: LinearTrigger): string {
   }
   if (trigger.issueIdentifier) return `Linear ${trigger.issueIdentifier}`;
   if (trigger.issueTitle) return `Linear ${trigger.issueTitle}`.slice(0, 80);
+  if (trigger.subjectLabel) return `Linear ${trigger.subjectLabel}`.slice(0, 80);
+  if (trigger.projectName) return `Linear ${trigger.projectName}`.slice(0, 80);
   return "Linear";
 }
 
@@ -752,7 +848,10 @@ function buildThinkingText(trigger: LinearTrigger): string {
 }
 
 function buildStopText(trigger: LinearTrigger): string {
-  const target = `${trigger.issueIdentifier} ${trigger.issueTitle}`.trim();
+  const target =
+    `${trigger.issueIdentifier} ${trigger.issueTitle}`.trim() ||
+    trigger.subjectLabel ||
+    trigger.projectName;
   if (target) {
     return `Stop request received. I will not continue the current run for ${target}.`;
   }

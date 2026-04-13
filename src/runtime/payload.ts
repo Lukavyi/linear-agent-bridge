@@ -3,6 +3,7 @@ import { readObject, readString } from "../util.js";
 
 export type LinearTriggerAction = "created" | "prompted";
 export type LinearTriggerSource = "agent-session" | "comment";
+export type LinearSubjectType = "issue" | "project" | "project-update" | "unknown";
 
 export interface LinearTrigger {
   source: LinearTriggerSource;
@@ -17,11 +18,17 @@ export interface LinearTrigger {
   prompt: string;
   promptContext: string;
   guidance: string;
+  subjectType: LinearSubjectType;
+  subjectId: string;
+  subjectLabel: string;
+  subjectUrl: string;
   issueId: string;
   issueIdentifier: string;
   issueTitle: string;
   issueDescription: string;
   issueUrl: string;
+  projectId: string;
+  projectName: string;
   teamKey: string;
   projectKey: string;
   commentId: string;
@@ -59,12 +66,24 @@ export function parseLinearTrigger(
   if (!sessionId) return null;
 
   const issue =
-    readObject(payload.issue) ??
-    readObject(session?.issue) ??
-    readObject(activity?.issue) ??
-    readObject(comment?.issue);
+    resolveIssueContext(payload) ??
+    resolveIssueContext(session) ??
+    resolveIssueContext(activity) ??
+    resolveIssueContext(comment);
+  const projectUpdate =
+    resolveProjectUpdateContext(payload) ??
+    resolveProjectUpdateContext(session) ??
+    resolveProjectUpdateContext(activity) ??
+    resolveProjectUpdateContext(comment);
+  const project =
+    resolveProjectContext(payload) ??
+    resolveProjectContext(session) ??
+    resolveProjectContext(activity) ??
+    resolveProjectContext(comment) ??
+    readObject(projectUpdate?.project) ??
+    readObject(issue?.project);
   const issueTeam = readObject(issue?.team);
-  const issueProject = readObject(issue?.project);
+  const projectTeam = readObject(project?.team);
   const activityContent = readObject(activity?.content);
   const prompt =
     readString(activity?.body) ??
@@ -89,6 +108,7 @@ export function parseLinearTrigger(
   const activityId = readString(activity?.id) ?? "";
   const deliveryId = readString(payload.linearDelivery) ?? "";
   const webhookId = readString(payload.webhookId) ?? "";
+  const subject = resolveSubject(issue, project, projectUpdate);
 
   return {
     source: kind.toLowerCase() === "comment" ? "comment" : "agent-session",
@@ -111,16 +131,146 @@ export function parseLinearTrigger(
     prompt,
     promptContext,
     guidance,
+    subjectType: subject.type,
+    subjectId: subject.id,
+    subjectLabel: subject.label,
+    subjectUrl: subject.url,
     issueId: readString(issue?.id) ?? "",
     issueIdentifier: readString(issue?.identifier) ?? "",
     issueTitle: readString(issue?.title) ?? "",
     issueDescription: readString(issue?.description) ?? "",
     issueUrl: readString(issue?.url) ?? "",
-    teamKey: readString(issueTeam?.key) ?? readString(issueTeam?.id) ?? "",
-    projectKey: readString(issueProject?.key) ?? readString(issueProject?.id) ?? "",
+    projectId: readString(project?.id) ?? "",
+    projectName: readString(project?.name) ?? "",
+    teamKey:
+      readString(issueTeam?.key) ??
+      readString(projectTeam?.key) ??
+      readString(issueTeam?.id) ??
+      readString(projectTeam?.id) ??
+      "",
+    projectKey: readString(project?.key) ?? readString(project?.id) ?? "",
     commentId,
     activityId,
   };
+}
+
+export function resolveIssueContext(
+  payload: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!payload) return undefined;
+  const direct = readObject(payload.issue);
+  if (direct) return direct;
+
+  const comment = readObject(payload.comment);
+  const commentIssue = readObject(comment?.issue);
+  if (commentIssue) return commentIssue;
+
+  const issueId =
+    readString(payload.issueId) ??
+    readString(comment?.issueId) ??
+    "";
+  return issueId ? { id: issueId } : undefined;
+}
+
+export function resolveProjectContext(
+  payload: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!payload) return undefined;
+
+  const direct = readObject(payload.project);
+  if (direct) return direct;
+
+  const comment = readObject(payload.comment);
+  const commentProject = readObject(comment?.project);
+  if (commentProject) return commentProject;
+
+  const projectId =
+    readString(payload.projectId) ??
+    readString(comment?.projectId) ??
+    "";
+  if (projectId) return { id: projectId };
+
+  const issue = readObject(payload.issue);
+  const issueProject = readObject(issue?.project);
+  if (issueProject) return issueProject;
+
+  const projectUpdate = readObject(payload.projectUpdate);
+  const projectUpdateProject = readObject(projectUpdate?.project);
+  if (projectUpdateProject) return projectUpdateProject;
+
+  const commentProjectUpdate = readObject(comment?.projectUpdate);
+  return readObject(commentProjectUpdate?.project);
+}
+
+export function resolveProjectUpdateContext(
+  payload: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!payload) return undefined;
+
+  const direct = readObject(payload.projectUpdate);
+  if (direct) return direct;
+
+  const comment = readObject(payload.comment);
+  const commentProjectUpdate = readObject(comment?.projectUpdate);
+  if (commentProjectUpdate) return commentProjectUpdate;
+
+  const projectUpdateId =
+    readString(payload.projectUpdateId) ??
+    readString(comment?.projectUpdateId) ??
+    "";
+  return projectUpdateId ? { id: projectUpdateId } : undefined;
+}
+
+export function isProjectOnlyCommentPayload(
+  payload: Record<string, unknown>,
+): boolean {
+  const kind = (readString(payload.type) ?? "").toLowerCase();
+  if (kind !== "comment") return false;
+  if (resolveIssueContext(payload)) return false;
+  return Boolean(resolveProjectContext(payload) || resolveProjectUpdateContext(payload));
+}
+
+function resolveSubject(
+  issue: Record<string, unknown> | undefined,
+  project: Record<string, unknown> | undefined,
+  projectUpdate: Record<string, unknown> | undefined,
+): { type: LinearSubjectType; id: string; label: string; url: string } {
+  if (issue) {
+    const identifier = readString(issue.identifier) ?? "";
+    const title = readString(issue.title) ?? "";
+    return {
+      type: "issue",
+      id: readString(issue.id) ?? "",
+      label: `${identifier} ${title}`.trim() || title || identifier,
+      url: readString(issue.url) ?? "",
+    };
+  }
+
+  if (projectUpdate) {
+    const projectName = readString(project?.name) ?? "";
+    const title =
+      readString(projectUpdate.title) ??
+      readString(projectUpdate.name) ??
+      projectName;
+    return {
+      type: "project-update",
+      id: readString(projectUpdate.id) ?? "",
+      label: title ? `${title}`.trim() : "Project update",
+      url: readString(projectUpdate.url) ?? readString(project?.url) ?? "",
+    };
+  }
+
+  if (project) {
+    const name = readString(project.name) ?? "";
+    return {
+      type: "project",
+      id: readString(project.id) ?? "",
+      label: name || "Project",
+      url: readString(project.url) ?? "",
+    };
+  }
+
+  return { type: "unknown", id: "", label: "", url: "" };
 }
 
 function resolveAction(
