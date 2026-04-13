@@ -4,9 +4,7 @@ import {
   COMMENT_SESSION_QUERY,
   ISSUE_SESSION_QUERY,
 } from "../graphql/queries.js";
-import { AGENT_SESSION_CREATE_ON_COMMENT_MUTATION } from "../graphql/mutations.js";
 import { readArray, readObject, readString, sleep } from "../util.js";
-import { isProjectOnlyCommentPayload } from "./payload.js";
 
 const sessionByIssueRef: Record<string, string> = {};
 const sessionByCommentRef: Record<string, string> = {};
@@ -142,55 +140,6 @@ export function shouldDeferRootCommentCreateToNativeSession(input: {
   parentId: string;
 }): boolean {
   return input.isCreate && !input.parentId;
-}
-
-export function shouldBootstrapProjectCommentSession(
-  data: Record<string, unknown>,
-): boolean {
-  const action = (readString(data.action as string) ?? "").toLowerCase();
-  const isCreate = action === "create" || action === "created";
-  const comment = readObject(data.comment);
-  const parentId =
-    readString(comment?.parentId) ??
-    readString(data.parentId as string) ??
-    "";
-
-  return (
-    isCreate &&
-    !parentId &&
-    isProjectOnlyCommentPayload(data)
-  );
-}
-
-export async function bootstrapSessionOnComment(
-  api: OpenClawPluginApi,
-  cfg: PluginConfig,
-  data: Record<string, unknown>,
-): Promise<string> {
-  if (!shouldBootstrapProjectCommentSession(data)) return "";
-
-  const comment = readObject(data.comment);
-  const commentId =
-    readString(comment?.id) ?? readString(data.id as string) ?? "";
-  if (!commentId) return "";
-
-  const created = await callLinear(api, cfg, "agentSessionCreateOnComment", {
-    query: AGENT_SESSION_CREATE_ON_COMMENT_MUTATION,
-    variables: { commentId },
-  });
-  if (!created.ok) return "";
-
-  const root = readObject(created.data?.agentSessionCreateOnComment);
-  const session = readObject(root?.agentSession);
-  const directId = readString(session?.id) ?? "";
-  if (directId) {
-    rememberSessionHint(data, directId);
-    return directId;
-  }
-
-  const viaComment = await resolveSessionFromCommentWithRetry(api, cfg, commentId);
-  if (viaComment) rememberSessionHint(data, viaComment);
-  return viaComment;
 }
 
 export function resolveIssue(

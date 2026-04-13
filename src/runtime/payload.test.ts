@@ -47,8 +47,6 @@ test("parseLinearTrigger returns created for artificial root comment create", ()
   assert.equal(trigger?.action, "created");
   assert.equal(trigger?.sessionId, "session-1");
   assert.equal(trigger?.eventKey, "linear:session:session-1:created");
-  assert.equal(trigger?.subjectType, "issue");
-  assert.equal(trigger?.subjectLabel, "LUK-1 Test issue");
   assert.equal(trigger?.issueIdentifier, "LUK-1");
   assert.equal(trigger?.teamKey, "LUK");
   assert.equal(trigger?.projectKey, "done-camp");
@@ -111,31 +109,6 @@ test("parseLinearTrigger falls back to comment id for prompted comment events", 
   assert.ok(trigger);
   assert.equal(trigger?.action, "prompted");
   assert.equal(trigger?.eventKey, "linear:comment:comment-7");
-});
-
-test("parseLinearTrigger parses project comment context without issue fields", () => {
-  const trigger = parseLinearTrigger({
-    type: "Comment",
-    action: "create",
-    comment: {
-      id: "comment-project-1",
-      body: "@openclaw can you help?",
-      agentSession: { id: "session-project-1" },
-      project: {
-        id: "project-1",
-        key: "bridge",
-        name: "linear-agent-bridge + linear-proxy",
-        url: "https://linear.app/test/project/bridge",
-      },
-    },
-  });
-
-  assert.ok(trigger);
-  assert.equal(trigger?.subjectType, "project");
-  assert.equal(trigger?.subjectLabel, "linear-agent-bridge + linear-proxy");
-  assert.equal(trigger?.projectId, "project-1");
-  assert.equal(trigger?.projectKey, "bridge");
-  assert.equal(trigger?.issueId, "");
 });
 
 test("parseLinearTrigger returns null when no session can be resolved", () => {

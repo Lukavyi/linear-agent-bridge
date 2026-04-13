@@ -13,15 +13,6 @@ export const SESSION_UPDATE_MUTATION = `
   }
 `;
 
-export const AGENT_SESSION_CREATE_ON_COMMENT_MUTATION = `
-  mutation AgentSessionCreateOnComment($commentId: String!) {
-    agentSessionCreateOnComment(commentId: $commentId) {
-      success
-      agentSession { id }
-    }
-  }
-`;
-
 export const ISSUE_UPDATE_MUTATION = `
   mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
     issueUpdate(id: $id, input: $input) {
