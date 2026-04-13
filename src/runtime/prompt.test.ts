@@ -53,3 +53,39 @@ test("buildTurnMessage includes history, workspace, and current turn", () => {
   assert.doesNotMatch(message, /This is chat mode/i);
   assert.doesNotMatch(message, /This is task mode/i);
 });
+
+test("buildTurnMessage falls back to latest prompt activity when webhook prompt is empty", () => {
+  const message = buildTurnMessage({
+    cfg: { defaultDir: "/tmp/default" },
+    trigger: {
+      source: "agent-session",
+      kind: "AgentSessionEvent",
+      action: "prompted",
+      sessionId: "session-456",
+      eventKey: "linear:activity:activity-456",
+      webhookId: "",
+      deliveryId: "delivery-456",
+      signal: "",
+      prompt: "",
+      promptContext: "",
+      guidance: "",
+      issueId: "issue-456",
+      issueIdentifier: "LUK-456",
+      issueTitle: "Investigate prompt hydration",
+      issueDescription: "",
+      issueUrl: "",
+      teamKey: "LUK",
+      projectKey: "",
+      commentId: "",
+      activityId: "activity-456",
+    },
+    history: [
+      { type: "response", text: "Попередня відповідь" },
+      { type: "prompt", text: "Ні, давай йти до сліди" },
+      { type: "thought", text: "Received your follow-up. Thinking now." },
+    ],
+  });
+
+  assert.match(message, /Current user turn:\nНі, давай йти до сліди/);
+  assert.doesNotMatch(message, /No direct prompt body was included in the webhook/);
+});

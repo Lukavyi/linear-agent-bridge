@@ -69,6 +69,7 @@ export function parseLinearTrigger(
   const prompt =
     readString(activity?.body) ??
     readString(activityContent?.body) ??
+    readString(payload.prompt) ??
     readString(comment?.body) ??
     readString(payload.body) ??
     readString(payload.message) ??

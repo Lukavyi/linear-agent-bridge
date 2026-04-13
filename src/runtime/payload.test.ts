@@ -74,6 +74,27 @@ test("parseLinearTrigger prefers activity id for prompted event keys", () => {
   assert.equal(trigger?.prompt, "please debug this");
 });
 
+test("parseLinearTrigger reads top-level prompt when activity body is absent", () => {
+  const trigger = parseLinearTrigger({
+    type: "AgentSessionEvent",
+    action: "prompted",
+    linearDelivery: "delivery-3",
+    prompt: "why is prompt missing?",
+    agentSession: {
+      id: "session-3",
+      issue: { id: "issue-3", identifier: "LUK-3", title: "Prompt bug" },
+    },
+    agentActivity: {
+      id: "activity-10",
+      agentSessionId: "session-3",
+    },
+  });
+
+  assert.ok(trigger);
+  assert.equal(trigger?.prompt, "why is prompt missing?");
+  assert.equal(trigger?.eventKey, "linear:activity:activity-10");
+});
+
 test("parseLinearTrigger falls back to comment id for prompted comment events", () => {
   const trigger = parseLinearTrigger({
     type: "Comment",

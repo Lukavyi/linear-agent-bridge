@@ -15,6 +15,7 @@ export function buildTurnMessage(input: {
   const { cfg, trigger, history } = input;
   const workspace = resolveSuggestedWorkspace(cfg, trigger);
   const historyBlock = formatHistory(history);
+  const currentTurn = resolveCurrentTurn(trigger, history);
 
   return [
     "You are replying inside a native Linear agent session.",
@@ -45,8 +46,8 @@ export function buildTurnMessage(input: {
       ? `Prompt context from Linear:\n${trigger.promptContext}`
       : "",
     historyBlock,
-    trigger.prompt
-      ? `Current user turn:\n${trigger.prompt}`
+    currentTurn
+      ? `Current user turn:\n${currentTurn}`
       : "Current user turn:\nNo direct prompt body was included in the webhook. Use the session context and activity history, and if still ambiguous ask one concise clarifying question.",
   ]
     .filter(Boolean)
@@ -65,6 +66,23 @@ export function buildExtraSystemPrompt(): string {
     "Do not spawn subagents unless the user explicitly asks for delegation or subagents.",
     "If the user asked for work, you may do that work in the same turn, but still finish with a concise visible result or blocker.",
   ].join(" ");
+}
+
+function resolveCurrentTurn(
+  trigger: LinearTrigger,
+  history: HistoryEntry[],
+): string {
+  const direct = trigger.prompt.trim();
+  if (direct) return direct;
+
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const entry = history[index];
+    if (entry?.type !== "prompt") continue;
+    const text = entry.text.trim();
+    if (text) return text;
+  }
+
+  return "";
 }
 
 function formatHistory(history: HistoryEntry[]): string {
