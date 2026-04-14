@@ -20,6 +20,7 @@ This repo is for the plugin runtime itself. It is not a full infrastructure guid
 - Publishes exactly one final visible `response` or `error`
 - Uses `AgentSessionEvent` as the canonical trigger for native Linear session runs
 - Deduplicates known duplicate webhook combinations
+- Supports a gateway-authenticated manual reconcile route for recovering missed turns
 - Supports OAuth callback and code exchange routes for app installation
 - Optionally publishes post-run tool/file trace breadcrumbs when `linearDebugToolTrace=true`
 
@@ -37,10 +38,20 @@ Linear is treated as a conversational surface. OpenClaw remains the runtime that
 `index.ts` registers only these routes:
 
 - `/plugins/linear/linear`
+- `/plugins/linear/reconcile`
 - `/plugins/linear/oauth/callback`
 - `/plugins/linear/oauth/exchange`
 
 If your public ingress uses a proxy or tunnel, it still needs to forward into those plugin routes.
+
+`/plugins/linear/reconcile` is different from the webhook route:
+
+- it is intended for operator-triggered recovery when Linear webhooks were missed
+- it uses gateway auth instead of webhook signature auth
+- it pulls the current Agent Session state from Linear directly
+- it only replays turns that still look unresolved
+
+That route persists processed event keys to a small local state file so a later webhook retry does not replay the same prompt twice.
 
 ## Runtime model
 
@@ -134,6 +145,7 @@ Core runtime settings:
 - `linearOauthClientSecret`
 - `linearOauthRedirectUri`
 - `linearTokenStorePath` - persisted OAuth token storage
+- `reconcileStatePath` - optional override for durable processed-event state used by manual reconcile
 - `openclawProvider` - provider override, default `openai`
 - `openclawModel` - model override, default `gpt-5.4`
 - `openclawThinking` - thinking override, default `high`
@@ -192,6 +204,29 @@ The plugin id remains `linear-agent-bridge`.
    - only one OpenClaw run happens for the turn
    - exactly one final visible `response` or `error` is published
    - follow-up prompts continue the same conversation
+
+## Manual reconcile fallback
+
+If a webhook is missed, you can manually ask the plugin to reconcile a specific session.
+
+POST to `/plugins/linear/reconcile` with gateway auth:
+
+```json
+{
+  "sessionId": "<linear-agent-session-id>",
+  "includeCreated": true,
+  "limit": 100
+}
+```
+
+Behavior:
+
+- pulls the current Agent Session from Linear over GraphQL
+- detects unresolved prompt activities that have no later agent activity
+- optionally recovers an untouched `created` session if the session still has no agent activity at all
+- stores processed event keys durably so a later webhook retry skips already recovered turns
+
+This is meant as an operator recovery tool, not a high-frequency poller.
 
 ## Files that matter
 

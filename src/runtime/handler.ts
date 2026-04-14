@@ -16,6 +16,7 @@ import {
   readArray,
   readBody,
   readHeader,
+  readNumber,
   readObject,
   readString,
   sendJson,
@@ -40,6 +41,14 @@ import {
   parseLinearTrigger,
   type LinearTrigger,
 } from "./payload.js";
+import {
+  buildReconcilePlan,
+  loadReconcileSnapshot,
+} from "./reconcile.js";
+import {
+  isDurablyProcessedEvent,
+  markDurablyProcessedEvent,
+} from "./reconcile-state.js";
 
 const MAX_BODY = 2 * 1024 * 1024;
 const WEBHOOK_STALE_MS = 60_000;
@@ -174,11 +183,20 @@ async function processWebhook(
     return;
   }
 
+  await acceptTrigger(api, cfg, payload, trigger);
+}
+
+async function acceptTrigger(
+  api: OpenClawPluginApi,
+  cfg: PluginConfig,
+  payload: Record<string, unknown>,
+  trigger: LinearTrigger,
+): Promise<boolean> {
   if (shouldIgnoreNativeCommentTrigger(payload, trigger)) {
     api.logger.info?.(
       `linear runtime: ignored native comment trigger session=${trigger.sessionId} action=${trigger.action}`,
     );
-    return;
+    return false;
   }
 
   const bootstrapCommentCandidate = isBootstrapCommentCandidate(payload, trigger);
@@ -187,7 +205,7 @@ async function processWebhook(
       api.logger.info?.(
         `linear runtime: skipped created bootstrap duplicate session=${trigger.sessionId}`,
       );
-      return;
+      return false;
     }
     markSessionMarker(recentSessionCreatedAt, trigger.sessionId);
   } else if (bootstrapCommentCandidate) {
@@ -195,7 +213,7 @@ async function processWebhook(
       api.logger.info?.(
         `linear runtime: skipped bootstrap comment duplicate session=${trigger.sessionId}`,
       );
-      return;
+      return false;
     }
     markSessionMarker(recentBootstrapCommentRunsAt, trigger.sessionId);
   } else {
@@ -210,7 +228,7 @@ async function processWebhook(
         api.logger.info?.(
           `linear runtime: skipped prompted duplicate session=${trigger.sessionId} source=${trigger.source}`,
         );
-        return;
+        return false;
       }
     }
   }
@@ -229,18 +247,109 @@ async function processWebhook(
 
   if (hasRecentKey(recentEventKeys, trigger.eventKey)) {
     api.logger.info?.(`linear runtime: skipped duplicate event ${trigger.eventKey}`);
-    return;
+    return false;
+  }
+  if (await isDurablyProcessedEvent(cfg, trigger.eventKey)) {
+    api.logger.info?.(`linear runtime: skipped durable duplicate event ${trigger.eventKey}`);
+    return false;
   }
   markRecentKey(recentEventKeys, trigger.eventKey);
 
   if (trigger.signal === "stop") {
     await handleStopSignal(api, cfg, trigger);
-    return;
+    return true;
   }
 
   enqueueSessionTurn(trigger.sessionId, async () => {
     await executeTurn(api, cfg, trigger);
   });
+  return true;
+}
+
+export function createLinearReconcileRoute(
+  api: OpenClawPluginApi,
+): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  return async (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.setHeader("Allow", "POST");
+      res.end("Method Not Allowed");
+      return;
+    }
+
+    const read = await readBody(req, MAX_BODY);
+    if (!read.ok) {
+      sendJson(res, read.status, { ok: false, error: read.error });
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(read.body.toString("utf8"));
+    } catch {
+      sendJson(res, 400, { ok: false, error: "Invalid JSON" });
+      return;
+    }
+
+    const body = readObject(parsed);
+    const sessionId = readString(body?.sessionId);
+    if (!sessionId) {
+      sendJson(res, 400, { ok: false, error: "Missing sessionId" });
+      return;
+    }
+
+    const cfg = normalizeCfg(api.pluginConfig);
+    const snapshot = await loadReconcileSnapshot(api, cfg, {
+      sessionId,
+      includeCreated: body?.includeCreated !== false,
+      limit: readNumber(body?.limit),
+    });
+    if (!snapshot) {
+      sendJson(res, 404, { ok: false, error: "Agent session not found" });
+      return;
+    }
+
+    const plan = buildReconcilePlan({
+      snapshot,
+      includeCreated: body?.includeCreated !== false,
+      isEventProcessed: (eventKey) => hasRecentKey(recentEventKeys, eventKey),
+    });
+
+    const accepted: string[] = [];
+    const skipped: string[] = [];
+
+    if (plan.createdTrigger) {
+      if (await isDurablyProcessedEvent(cfg, plan.createdTrigger.eventKey)) {
+        skipped.push(plan.createdTrigger.eventKey);
+      } else if (await acceptTrigger(api, cfg, {}, plan.createdTrigger)) {
+        accepted.push(plan.createdTrigger.eventKey);
+      } else {
+        skipped.push(plan.createdTrigger.eventKey);
+      }
+    }
+
+    for (const trigger of plan.promptTriggers) {
+      if (await isDurablyProcessedEvent(cfg, trigger.eventKey)) {
+        skipped.push(trigger.eventKey);
+        continue;
+      }
+      if (await acceptTrigger(api, cfg, {}, trigger)) {
+        accepted.push(trigger.eventKey);
+      } else {
+        skipped.push(trigger.eventKey);
+      }
+    }
+
+    sendJson(res, 200, {
+      ok: true,
+      sessionId,
+      status: snapshot.status,
+      accepted,
+      skipped,
+      acceptedCount: accepted.length,
+      skippedCount: skipped.length,
+    });
+  };
 }
 
 export function shouldAllowSelfAuthoredBootstrap(
@@ -617,6 +726,7 @@ async function postTerminalActivity(
     `linear runtime: terminal activity published session=${trigger.sessionId} type=${content.type} attempts=${result.attempts}`,
   );
   markRecentKey(recentTerminalKeys, trigger.eventKey);
+  await markDurableEvent(api, cfg, trigger.eventKey);
   return true;
 }
 
@@ -815,5 +925,19 @@ function pruneRecentKeys(store: Map<string, number>): void {
   const cutoff = Date.now() - RECENT_KEY_TTL_MS;
   for (const [key, timestamp] of store.entries()) {
     if (timestamp < cutoff) store.delete(key);
+  }
+}
+
+async function markDurableEvent(
+  api: OpenClawPluginApi,
+  cfg: PluginConfig,
+  eventKey: string,
+): Promise<void> {
+  try {
+    await markDurablyProcessedEvent(cfg, eventKey);
+  } catch (error) {
+    api.logger.warn?.(
+      `linear runtime: failed to persist processed event ${eventKey}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }

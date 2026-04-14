@@ -18,6 +18,7 @@ export function normalizeCfg(
     linearOauthClientSecret: readCfgString(cfg, "linearOauthClientSecret"),
     linearOauthRedirectUri: readCfgString(cfg, "linearOauthRedirectUri"),
     linearTokenStorePath: readCfgString(cfg, "linearTokenStorePath"),
+    reconcileStatePath: readCfgString(cfg, "reconcileStatePath"),
     repoByTeam: readCfgMap(cfg, "repoByTeam"),
     repoByProject: readCfgMap(cfg, "repoByProject"),
     defaultDir: readCfgString(cfg, "defaultDir"),

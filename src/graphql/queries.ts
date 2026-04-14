@@ -107,3 +107,61 @@ export const AGENT_SESSION_ACTIVITIES_QUERY = `
     }
   }
 `;
+
+export const AGENT_SESSION_RECONCILE_QUERY = `
+  query AgentSessionReconcile($id: String!, $first: Int!) {
+    agentSession(id: $id) {
+      id
+      status
+      issue {
+        id
+        identifier
+        title
+        description
+        url
+        team { id key }
+        project { id key }
+      }
+      comment {
+        id
+        body
+        parentId
+      }
+      sourceComment {
+        id
+        body
+        parentId
+      }
+      activities(first: $first, orderBy: createdAt) {
+        nodes {
+          id
+          createdAt
+          updatedAt
+          content {
+            __typename
+            ... on AgentActivityThoughtContent {
+              body
+            }
+            ... on AgentActivityActionContent {
+              action
+              parameter
+              result
+            }
+            ... on AgentActivityElicitationContent {
+              body
+            }
+            ... on AgentActivityResponseContent {
+              body
+            }
+            ... on AgentActivityErrorContent {
+              body
+            }
+            ... on AgentActivityPromptContent {
+              body
+            }
+          }
+        }
+      }
+    }
+  }
+`;
