@@ -58,6 +58,8 @@ const ACTIVITY_RETRY_DELAYS_MS = [0, 250, 1000, 2500];
 const BOOTSTRAP_DEBOUNCE_MS = 2000;
 const BOOTSTRAP_DUPLICATE_WINDOW_MS = 5000;
 const PROMPTED_DUPLICATE_WINDOW_MS = 5000;
+const COMMENT_PROMPT_HINT_TTL_MS = 2 * 60 * 1000;
+const MISSING_PROMPT_HINT_DELAYS_MS = [0, 250, 500, 1000];
 
 const sessionQueues = new Map<string, Promise<void>>();
 const recentEventKeys = new Map<string, number>();
@@ -65,7 +67,14 @@ const recentTerminalKeys = new Map<string, number>();
 const recentSessionCreatedAt = new Map<string, number>();
 const recentBootstrapCommentRunsAt = new Map<string, number>();
 const recentPromptedSessionRunsAt = new Map<string, number>();
+const recentCommentPromptHints = new Map<string, PromptHint>();
 const sessionRunStates = new Map<string, SessionRunState>();
+
+interface PromptHint {
+  text: string;
+  commentId: string;
+  recordedAt: number;
+}
 
 interface SessionRunState {
   nextRunId: number;
@@ -174,6 +183,10 @@ async function processWebhook(
       api.logger.info?.("linear runtime: skipped self-authored Comment webhook");
       return;
     }
+  }
+
+  if (trigger) {
+    rememberCommentPromptHint(trigger, payload);
   }
 
   if (!trigger) {
@@ -438,6 +451,76 @@ export function resetPromptedDuplicateState(): void {
   recentPromptedSessionRunsAt.clear();
 }
 
+export function resetCommentPromptHintState(): void {
+  recentCommentPromptHints.clear();
+}
+
+export function rememberCommentPromptHint(
+  trigger: LinearTrigger,
+  payload: Record<string, unknown>,
+): void {
+  if (trigger.source !== "comment") return;
+  const text = extractCommentPromptHintText(trigger, payload);
+  if (!text) return;
+  pruneCommentPromptHints();
+  recentCommentPromptHints.set(trigger.sessionId, {
+    text,
+    commentId: trigger.commentId,
+    recordedAt: Date.now(),
+  });
+}
+
+export async function hydrateTriggerPromptFromCommentHint(
+  trigger: LinearTrigger,
+  delaysMs: number[] = MISSING_PROMPT_HINT_DELAYS_MS,
+): Promise<LinearTrigger> {
+  if (trigger.action !== "prompted") return trigger;
+  if (trigger.prompt.trim()) return trigger;
+
+  for (let index = 0; index < delaysMs.length; index += 1) {
+    const delayMs = delaysMs[index] ?? 0;
+    if (delayMs > 0) await sleep(delayMs);
+    const hint = consumeFreshCommentPromptHint(trigger.sessionId);
+    if (!hint) continue;
+    return {
+      ...trigger,
+      prompt: hint.text,
+      commentId: trigger.commentId || hint.commentId,
+    };
+  }
+
+  return trigger;
+}
+
+function extractCommentPromptHintText(
+  trigger: LinearTrigger,
+  payload: Record<string, unknown>,
+): string {
+  const text =
+    trigger.prompt.trim() ||
+    readString(readObject(payload.comment)?.body)?.trim() ||
+    readString(payload.body)?.trim() ||
+    "";
+  return text;
+}
+
+function consumeFreshCommentPromptHint(sessionId: string): PromptHint | undefined {
+  pruneCommentPromptHints();
+  const hint = recentCommentPromptHints.get(sessionId);
+  if (!hint) return undefined;
+  recentCommentPromptHints.delete(sessionId);
+  return hint;
+}
+
+function pruneCommentPromptHints(): void {
+  const cutoff = Date.now() - COMMENT_PROMPT_HINT_TTL_MS;
+  for (const [key, value] of recentCommentPromptHints.entries()) {
+    if (value.recordedAt < cutoff) {
+      recentCommentPromptHints.delete(key);
+    }
+  }
+}
+
 function hasFreshSessionMarker(
   store: Map<string, number>,
   sessionId: string,
@@ -513,8 +596,14 @@ async function handleStopSignal(
 async function executeTurn(
   api: OpenClawPluginApi,
   cfg: PluginConfig,
-  trigger: LinearTrigger,
+  inputTrigger: LinearTrigger,
 ): Promise<void> {
+  const trigger = await hydrateTriggerPromptFromCommentHint(inputTrigger);
+  if (!inputTrigger.prompt.trim() && trigger.prompt.trim()) {
+    api.logger.info?.(
+      `linear runtime: hydrated missing prompt from comment hint session=${trigger.sessionId}`,
+    );
+  }
   const state = getSessionRunState(trigger.sessionId);
   const runId = state.nextRunId + 1;
   state.nextRunId = runId;
