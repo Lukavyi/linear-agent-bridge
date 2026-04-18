@@ -7,13 +7,20 @@ export interface HistoryEntry {
   updatedAt?: string;
 }
 
+export interface IssueCommentEntry {
+  author: string;
+  text: string;
+}
+
 export function buildTurnMessage(input: {
   cfg: PluginConfig;
   trigger: LinearTrigger;
   history: HistoryEntry[];
+  issueComments?: IssueCommentEntry[];
 }): string {
-  const { cfg, trigger, history } = input;
+  const { cfg, trigger, history, issueComments = [] } = input;
   const workspace = resolveSuggestedWorkspace(cfg, trigger);
+  const issueContextBlock = formatIssueContext(trigger, issueComments);
   const historyBlock = formatHistory(history);
   const currentTurn = resolveCurrentTurn(trigger, history);
 
@@ -42,9 +49,7 @@ export function buildTurnMessage(input: {
     workspace ? `- Suggested workspace: ${workspace}` : "",
     trigger.guidance ? `- Guidance: ${trigger.guidance}` : "",
     "",
-    trigger.promptContext
-      ? `Prompt context from Linear:\n${trigger.promptContext}`
-      : "",
+    issueContextBlock,
     historyBlock,
     currentTurn
       ? `Current user turn:\n${currentTurn}`
@@ -83,6 +88,24 @@ function resolveCurrentTurn(
   }
 
   return "";
+}
+
+function formatIssueContext(
+  trigger: LinearTrigger,
+  issueComments: IssueCommentEntry[],
+): string {
+  const sections: string[] = [];
+  const description = trigger.issueDescription.trim();
+  if (description) {
+    sections.push(`Issue description:\n${description}`);
+  }
+  if (issueComments.length > 0) {
+    const recent = issueComments.slice(-8);
+    const lines = recent.map((entry) => `- ${entry.author}: ${entry.text}`);
+    sections.push(`Recent issue comments:\n${lines.join("\n")}`);
+  }
+  if (sections.length === 0) return "";
+  return `Issue context:\n${sections.join("\n\n")}`;
 }
 
 function formatHistory(history: HistoryEntry[]): string {

@@ -5,7 +5,10 @@ import {
   ACTIVITY_MUTATION,
   SESSION_UPDATE_MUTATION,
 } from "../graphql/mutations.js";
-import { AGENT_SESSION_ACTIVITIES_QUERY } from "../graphql/queries.js";
+import {
+  AGENT_SESSION_ACTIVITIES_QUERY,
+  ISSUE_PROMPT_CONTEXT_QUERY,
+} from "../graphql/queries.js";
 import { callLinear } from "../linear-client.js";
 import type {
   ActivityContent,
@@ -33,6 +36,7 @@ import {
   buildExtraSystemPrompt,
   buildTurnMessage,
   type HistoryEntry,
+  type IssueCommentEntry,
 } from "./prompt.js";
 import { buildToolTraceActivities } from "./tool-trace.js";
 import {
@@ -536,13 +540,16 @@ async function executeTurn(
       }
     }
 
-    const history = await loadActivityHistory(api, cfg, trigger.sessionId);
+    const [history, issueComments] = await Promise.all([
+      loadActivityHistory(api, cfg, trigger.sessionId),
+      loadIssueCommentContext(api, cfg, trigger),
+    ]);
     runStartedAtMs = Date.now();
     const result = await runGatewayTurn(api, cfg, {
       agentId,
       sessionKey,
       label: buildLabel(trigger),
-      message: buildTurnMessage({ cfg, trigger, history }),
+      message: buildTurnMessage({ cfg, trigger, history, issueComments }),
       idempotencyKey: trigger.eventKey,
       extraSystemPrompt: buildExtraSystemPrompt(),
       timeoutMs: AGENT_TIMEOUT_MS,
@@ -629,6 +636,48 @@ async function loadActivityHistory(
   }
 
   return history;
+}
+
+async function loadIssueCommentContext(
+  api: OpenClawPluginApi,
+  cfg: PluginConfig,
+  trigger: LinearTrigger,
+): Promise<IssueCommentEntry[]> {
+  if (!trigger.issueId) return [];
+
+  const result = await callLinear(api, cfg, "issue(prompt-context)", {
+    query: ISSUE_PROMPT_CONTEXT_QUERY,
+    variables: { id: trigger.issueId },
+  });
+  if (!result.ok) return [];
+
+  const issue = readObject(result.data?.issue);
+  const comments = readObject(issue?.comments);
+  const nodes = readArray(comments?.nodes);
+  const entries: IssueCommentEntry[] = [];
+
+  for (const node of nodes) {
+    const comment = readObject(node);
+    if (!comment) continue;
+    if (readString(comment.parentId)) continue;
+    if (readString(readObject(comment.botActor)?.id)) continue;
+    if (readString(readObject(comment.agentSession)?.id)) continue;
+    const agentSessions = readArray(readObject(comment.agentSessions)?.nodes);
+    if (agentSessions.length > 0) continue;
+    const id = readString(comment.id) ?? "";
+    if (id && id === trigger.commentId) continue;
+    const text = compactText(readString(comment.body) ?? "");
+    if (!text) continue;
+    const author =
+      compactText(readString(readObject(comment.user)?.name) ?? "") || "Unknown";
+    entries.push({ author, text });
+  }
+
+  return entries.slice(-8);
+}
+
+function compactText(input: string): string {
+  return input.replace(/\s+/g, " ").trim();
 }
 
 function normalizeActivityType(typename: string): string {

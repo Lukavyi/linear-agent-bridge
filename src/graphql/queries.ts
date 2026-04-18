@@ -69,6 +69,37 @@ export const ISSUE_SESSION_QUERY = `
   }
 `;
 
+export const ISSUE_PROMPT_CONTEXT_QUERY = `
+  query IssuePromptContext($id: String!) {
+    issue(id: $id) {
+      id
+      comments(first: 50) {
+        nodes {
+          id
+          body
+          parentId
+          user {
+            id
+            name
+          }
+          botActor {
+            id
+            name
+          }
+          agentSession {
+            id
+          }
+          agentSessions(first: 1) {
+            nodes {
+              id
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
 export const AGENT_SESSION_ACTIVITIES_QUERY = `
   query AgentSessionActivities($id: String!) {
     agentSession(id: $id) {

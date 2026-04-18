@@ -12,7 +12,7 @@ test("buildExtraSystemPrompt uses one stable contract without turn-mode heuristi
   assert.doesNotMatch(prompt, /task mode/i);
 });
 
-test("buildTurnMessage includes history, workspace, and current turn", () => {
+test("buildTurnMessage includes compact issue context, history, workspace, and current turn", () => {
   const message = buildTurnMessage({
     cfg: {
       defaultDir: "/tmp/default",
@@ -28,12 +28,12 @@ test("buildTurnMessage includes history, workspace, and current turn", () => {
       deliveryId: "delivery-123",
       signal: "",
       prompt: "Пофікси будь ласка Linear bridge",
-      promptContext: "Issue discussion",
+      promptContext: "Huge XML blob that should not leak through",
       guidance: "Keep it concise",
       issueId: "issue-123",
       issueIdentifier: "LUK-123",
       issueTitle: "Fix Linear bridge",
-      issueDescription: "",
+      issueDescription: "Only include the useful issue summary",
       issueUrl: "https://linear.app/test/issue/LUK-123",
       teamKey: "LUK",
       projectKey: "done-camp",
@@ -44,12 +44,19 @@ test("buildTurnMessage includes history, workspace, and current turn", () => {
       { type: "thought", text: "Received an update on LUK-123" },
       { type: "prompt", text: "Пофікси будь ласка Linear bridge" },
     ],
+    issueComments: [
+      { author: "Taras Lukavyi", text: "Не давай весь паралельний agent spam у prompt" },
+    ],
   });
 
   assert.match(message, /Linear AgentSession and AgentActivity are the source of truth/);
   assert.match(message, /Suggested workspace: \/repos\/done_camp/);
+  assert.match(message, /Issue context:/);
+  assert.match(message, /Only include the useful issue summary/);
+  assert.match(message, /Taras Lukavyi: Не давай весь паралельний agent spam у prompt/);
   assert.match(message, /Recent AgentActivity history:/);
   assert.match(message, /Current user turn:\nПофікси будь ласка Linear bridge/);
+  assert.doesNotMatch(message, /Huge XML blob that should not leak through/);
   assert.doesNotMatch(message, /This is chat mode/i);
   assert.doesNotMatch(message, /This is task mode/i);
 });
