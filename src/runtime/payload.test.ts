@@ -95,6 +95,47 @@ test("parseLinearTrigger reads top-level prompt when activity body is absent", (
   assert.equal(trigger?.eventKey, "linear:activity:activity-10");
 });
 
+test("parseLinearTrigger reads created prompt from agentSession comment body", () => {
+  const trigger = parseLinearTrigger({
+    type: "AgentSessionEvent",
+    action: "created",
+    linearDelivery: "delivery-3b",
+    agentSession: {
+      id: "session-3b",
+      comment: {
+        id: "comment-3b",
+        body: "@openclaw check the proxy logs",
+      },
+      issue: { id: "issue-3b", identifier: "LUK-3B", title: "Created path bug" },
+    },
+  });
+
+  assert.ok(trigger);
+  assert.equal(trigger?.prompt, "@openclaw check the proxy logs");
+  assert.equal(trigger?.commentId, "comment-3b");
+  assert.equal(trigger?.eventKey, "linear:session:session-3b:created");
+});
+
+test("parseLinearTrigger falls back to previous comments for created prompt", () => {
+  const trigger = parseLinearTrigger({
+    type: "AgentSessionEvent",
+    action: "created",
+    linearDelivery: "delivery-3c",
+    agentSession: {
+      id: "session-3c",
+      issue: { id: "issue-3c", identifier: "LUK-3C", title: "Previous comments prompt bug" },
+    },
+    previousComments: [
+      { id: "comment-old", body: "earlier context" },
+      { id: "comment-new", body: "latest real first message" },
+    ],
+  });
+
+  assert.ok(trigger);
+  assert.equal(trigger?.prompt, "latest real first message");
+  assert.equal(trigger?.eventKey, "linear:session:session-3c:created");
+});
+
 test("parseLinearTrigger falls back to comment id for prompted comment events", () => {
   const trigger = parseLinearTrigger({
     type: "Comment",

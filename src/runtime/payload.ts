@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readObject, readString } from "../util.js";
+import { readArray, readObject, readString } from "../util.js";
 
 export type LinearTriggerAction = "created" | "prompted";
 export type LinearTriggerSource = "agent-session" | "comment";
@@ -48,6 +48,8 @@ export function parseLinearTrigger(
   const session = readObject(payload.agentSession);
   const activity = readObject(payload.agentActivity);
   const comment = readObject(payload.comment);
+  const sessionComment = readObject(session?.comment);
+  const previousComments = readArray(payload.previousComments);
   const sessionId =
     readString(payload.agentSessionId) ??
     readString(session?.id) ??
@@ -70,6 +72,8 @@ export function parseLinearTrigger(
     readString(activity?.body) ??
     readString(activityContent?.body) ??
     readString(payload.prompt) ??
+    readString(sessionComment?.body) ??
+    readLatestCommentBody(previousComments) ??
     readString(comment?.body) ??
     readString(payload.body) ??
     readString(payload.message) ??
@@ -85,6 +89,7 @@ export function parseLinearTrigger(
     "";
   const commentId =
     readString(comment?.id) ??
+    readString(sessionComment?.id) ??
     (kind.toLowerCase() === "comment" ? readString(payload.id) ?? "" : "");
   const activityId = readString(activity?.id) ?? "";
   const deliveryId = readString(payload.linearDelivery) ?? "";
@@ -121,6 +126,14 @@ export function parseLinearTrigger(
     commentId,
     activityId,
   };
+}
+
+function readLatestCommentBody(comments: unknown[]): string | undefined {
+  for (let index = comments.length - 1; index >= 0; index -= 1) {
+    const body = readString(readObject(comments[index])?.body);
+    if (body) return body;
+  }
+  return undefined;
 }
 
 function resolveAction(
