@@ -54,10 +54,6 @@
         "type": "string",
         "description": "Workspace-local path for persisted Linear OAuth tokens"
       },
-      "reconcileStatePath": {
-        "type": "string",
-        "description": "Optional path for durable processed-event state used by manual reconcile fallback"
-      },
       "notifyChannel": {
         "type": "string",
         "description": "Optional channel to deliver agent responses (e.g., 'discord')"
@@ -175,10 +171,6 @@
     "linearTokenStorePath": {
       "label": "OAuth token store path",
       "placeholder": "/home/ubuntu/.openclaw/workspace/.pi/linear-oauth.json"
-    },
-    "reconcileStatePath": {
-      "label": "Reconcile state path",
-      "placeholder": "/home/ubuntu/.openclaw/linear-agent-bridge-state.json"
     },
     "delegateOnCreate": {
       "label": "Auto delegate"

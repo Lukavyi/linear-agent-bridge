@@ -1,8 +1,5 @@
 import type { OpenClawPluginApi } from "./src/types.js";
-import {
-  createLinearReconcileRoute,
-  createLinearWebhook,
-} from "./src/runtime/handler.js";
+import { createLinearWebhook } from "./src/runtime/handler.js";
 import { createLinearOauthRoute } from "./src/oauth/route.js";
 
 export default function register(api: OpenClawPluginApi): void {
@@ -22,11 +19,5 @@ export default function register(api: OpenClawPluginApi): void {
     path: "/plugins/linear/oauth/exchange",
     handler: createLinearOauthRoute(api),
     auth: "plugin" as const,
-  });
-
-  api.registerHttpRoute({
-    path: "/plugins/linear/reconcile",
-    handler: createLinearReconcileRoute(api),
-    auth: "gateway" as const,
   });
 }

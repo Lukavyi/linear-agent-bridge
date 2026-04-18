@@ -16,7 +16,6 @@ import {
   readArray,
   readBody,
   readHeader,
-  readNumber,
   readObject,
   readString,
   sendJson,
@@ -41,16 +40,6 @@ import {
   parseLinearTrigger,
   type LinearTrigger,
 } from "./payload.js";
-import {
-  buildReconcilePlan,
-  loadReconcileSnapshot,
-  type ReconcilePlan,
-  type SessionReconcileSnapshot,
-} from "./reconcile.js";
-import {
-  isDurablyProcessedEvent,
-  markDurablyProcessedEvent,
-} from "./reconcile-state.js";
 
 const MAX_BODY = 2 * 1024 * 1024;
 const WEBHOOK_STALE_MS = 60_000;
@@ -62,7 +51,6 @@ const BOOTSTRAP_DUPLICATE_WINDOW_MS = 5000;
 const PROMPTED_DUPLICATE_WINDOW_MS = 5000;
 const COMMENT_PROMPT_HINT_TTL_MS = 2 * 60 * 1000;
 const MISSING_PROMPT_HINT_DELAYS_MS = [0, 250, 500, 1000];
-const AUTO_RECONCILE_PROMPT_DELAYS_MS = [0, 250, 1000, 2500];
 
 const sessionQueues = new Map<string, Promise<void>>();
 const recentEventKeys = new Map<string, number>();
@@ -199,20 +187,11 @@ async function processWebhook(
     return;
   }
 
-  await acceptTrigger(api, cfg, payload, trigger);
-}
-
-async function acceptTrigger(
-  api: OpenClawPluginApi,
-  cfg: PluginConfig,
-  payload: Record<string, unknown>,
-  trigger: LinearTrigger,
-): Promise<boolean> {
   if (shouldIgnoreNativeCommentTrigger(payload, trigger)) {
     api.logger.info?.(
       `linear runtime: ignored native comment trigger session=${trigger.sessionId} action=${trigger.action}`,
     );
-    return false;
+    return;
   }
 
   const bootstrapCommentCandidate = isBootstrapCommentCandidate(payload, trigger);
@@ -221,7 +200,7 @@ async function acceptTrigger(
       api.logger.info?.(
         `linear runtime: skipped created bootstrap duplicate session=${trigger.sessionId}`,
       );
-      return false;
+      return;
     }
     markSessionMarker(recentSessionCreatedAt, trigger.sessionId);
   } else if (bootstrapCommentCandidate) {
@@ -229,7 +208,7 @@ async function acceptTrigger(
       api.logger.info?.(
         `linear runtime: skipped bootstrap comment duplicate session=${trigger.sessionId}`,
       );
-      return false;
+      return;
     }
     markSessionMarker(recentBootstrapCommentRunsAt, trigger.sessionId);
   } else {
@@ -244,7 +223,7 @@ async function acceptTrigger(
         api.logger.info?.(
           `linear runtime: skipped prompted duplicate session=${trigger.sessionId} source=${trigger.source}`,
         );
-        return false;
+        return;
       }
     }
   }
@@ -263,109 +242,18 @@ async function acceptTrigger(
 
   if (hasRecentKey(recentEventKeys, trigger.eventKey)) {
     api.logger.info?.(`linear runtime: skipped duplicate event ${trigger.eventKey}`);
-    return false;
-  }
-  if (await isDurablyProcessedEvent(cfg, trigger.eventKey)) {
-    api.logger.info?.(`linear runtime: skipped durable duplicate event ${trigger.eventKey}`);
-    return false;
+    return;
   }
   markRecentKey(recentEventKeys, trigger.eventKey);
 
   if (trigger.signal === "stop") {
     await handleStopSignal(api, cfg, trigger);
-    return true;
+    return;
   }
 
   enqueueSessionTurn(trigger.sessionId, async () => {
     await executeTurn(api, cfg, trigger);
   });
-  return true;
-}
-
-export function createLinearReconcileRoute(
-  api: OpenClawPluginApi,
-): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  return async (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.setHeader("Allow", "POST");
-      res.end("Method Not Allowed");
-      return;
-    }
-
-    const read = await readBody(req, MAX_BODY);
-    if (!read.ok) {
-      sendJson(res, read.status, { ok: false, error: read.error });
-      return;
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(read.body.toString("utf8"));
-    } catch {
-      sendJson(res, 400, { ok: false, error: "Invalid JSON" });
-      return;
-    }
-
-    const body = readObject(parsed);
-    const sessionId = readString(body?.sessionId);
-    if (!sessionId) {
-      sendJson(res, 400, { ok: false, error: "Missing sessionId" });
-      return;
-    }
-
-    const cfg = normalizeCfg(api.pluginConfig);
-    const snapshot = await loadReconcileSnapshot(api, cfg, {
-      sessionId,
-      includeCreated: body?.includeCreated !== false,
-      limit: readNumber(body?.limit),
-    });
-    if (!snapshot) {
-      sendJson(res, 404, { ok: false, error: "Agent session not found" });
-      return;
-    }
-
-    const plan = buildReconcilePlan({
-      snapshot,
-      includeCreated: body?.includeCreated !== false,
-      isEventProcessed: (eventKey) => hasRecentKey(recentEventKeys, eventKey),
-    });
-
-    const accepted: string[] = [];
-    const skipped: string[] = [];
-
-    if (plan.createdTrigger) {
-      if (await isDurablyProcessedEvent(cfg, plan.createdTrigger.eventKey)) {
-        skipped.push(plan.createdTrigger.eventKey);
-      } else if (await acceptTrigger(api, cfg, {}, plan.createdTrigger)) {
-        accepted.push(plan.createdTrigger.eventKey);
-      } else {
-        skipped.push(plan.createdTrigger.eventKey);
-      }
-    }
-
-    for (const trigger of plan.promptTriggers) {
-      if (await isDurablyProcessedEvent(cfg, trigger.eventKey)) {
-        skipped.push(trigger.eventKey);
-        continue;
-      }
-      if (await acceptTrigger(api, cfg, {}, trigger)) {
-        accepted.push(trigger.eventKey);
-      } else {
-        skipped.push(trigger.eventKey);
-      }
-    }
-
-    sendJson(res, 200, {
-      ok: true,
-      sessionId,
-      status: snapshot.status,
-      accepted,
-      skipped,
-      acceptedCount: accepted.length,
-      skippedCount: skipped.length,
-    });
-  };
 }
 
 export function shouldAllowSelfAuthoredBootstrap(
@@ -495,84 +383,6 @@ export async function hydrateTriggerPromptFromCommentHint(
   return trigger;
 }
 
-export function recoverTriggerFromReconcilePlan(input: {
-  trigger: LinearTrigger;
-  snapshot: SessionReconcileSnapshot;
-  plan: ReconcilePlan;
-}): LinearTrigger {
-  const { trigger, snapshot, plan } = input;
-  if (trigger.prompt.trim()) return trigger;
-
-  const recoveredPromptTrigger = plan.promptTriggers.at(-1);
-  if (recoveredPromptTrigger) return recoveredPromptTrigger;
-
-  if (trigger.action !== "created") return trigger;
-
-  const fallbackPrompt =
-    snapshot.sourceComment.body.trim() ||
-    snapshot.comment.body.trim();
-  if (!fallbackPrompt) return trigger;
-
-  return {
-    ...trigger,
-    prompt: fallbackPrompt,
-    commentId:
-      trigger.commentId ||
-      snapshot.sourceComment.id ||
-      snapshot.comment.id,
-  };
-}
-
-async function hydrateTriggerPromptFromReconcile(
-  api: OpenClawPluginApi,
-  cfg: PluginConfig,
-  trigger: LinearTrigger,
-  delaysMs: number[] = AUTO_RECONCILE_PROMPT_DELAYS_MS,
-): Promise<LinearTrigger> {
-  if (trigger.prompt.trim()) return trigger;
-
-  for (let index = 0; index < delaysMs.length; index += 1) {
-    const delayMs = delaysMs[index] ?? 0;
-    if (delayMs > 0) await sleep(delayMs);
-
-    const snapshot = await loadReconcileSnapshot(api, cfg, {
-      sessionId: trigger.sessionId,
-      includeCreated: trigger.action === "created",
-    });
-    if (!snapshot) continue;
-
-    const plan = buildReconcilePlan({
-      snapshot,
-      includeCreated: trigger.action === "created",
-      isEventProcessed: (eventKey) =>
-        eventKey !== trigger.eventKey && hasRecentKey(recentEventKeys, eventKey),
-    });
-
-    const filteredPromptTriggers: LinearTrigger[] = [];
-    for (const candidate of plan.promptTriggers) {
-      if (candidate.eventKey === trigger.eventKey) continue;
-      if (await isDurablyProcessedEvent(cfg, candidate.eventKey)) continue;
-      filteredPromptTriggers.push(candidate);
-    }
-
-    const recovered = recoverTriggerFromReconcilePlan({
-      trigger,
-      snapshot,
-      plan: {
-        ...plan,
-        promptTriggers: filteredPromptTriggers,
-      },
-    });
-
-    if (recovered.eventKey !== trigger.eventKey) {
-      markRecentKey(recentEventKeys, recovered.eventKey);
-    }
-    if (recovered.prompt.trim()) return recovered;
-  }
-
-  return trigger;
-}
-
 function extractCommentPromptHintText(
   trigger: LinearTrigger,
   payload: Record<string, unknown>,
@@ -684,15 +494,6 @@ async function executeTurn(
     api.logger.info?.(
       `linear runtime: hydrated missing prompt from comment hint session=${trigger.sessionId}`,
     );
-  }
-  if (!trigger.prompt.trim()) {
-    const recovered = await hydrateTriggerPromptFromReconcile(api, cfg, trigger);
-    if (!trigger.prompt.trim() && recovered.prompt.trim()) {
-      api.logger.info?.(
-        `linear runtime: auto-recovered missing prompt from reconcile session=${recovered.sessionId} event=${recovered.eventKey}`,
-      );
-    }
-    trigger = recovered;
   }
   const state = getSessionRunState(trigger.sessionId);
   const runId = state.nextRunId + 1;
@@ -905,7 +706,6 @@ async function postTerminalActivity(
     `linear runtime: terminal activity published session=${trigger.sessionId} type=${content.type} attempts=${result.attempts}`,
   );
   markRecentKey(recentTerminalKeys, trigger.eventKey);
-  await markDurableEvent(api, cfg, trigger.eventKey);
   return true;
 }
 
@@ -1104,19 +904,5 @@ function pruneRecentKeys(store: Map<string, number>): void {
   const cutoff = Date.now() - RECENT_KEY_TTL_MS;
   for (const [key, timestamp] of store.entries()) {
     if (timestamp < cutoff) store.delete(key);
-  }
-}
-
-async function markDurableEvent(
-  api: OpenClawPluginApi,
-  cfg: PluginConfig,
-  eventKey: string,
-): Promise<void> {
-  try {
-    await markDurablyProcessedEvent(cfg, eventKey);
-  } catch (error) {
-    api.logger.warn?.(
-      `linear runtime: failed to persist processed event ${eventKey}: ${error instanceof Error ? error.message : String(error)}`,
-    );
   }
 }

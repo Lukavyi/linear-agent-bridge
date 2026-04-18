@@ -33,7 +33,6 @@ export interface PluginConfig {
   linearOauthClientSecret?: string;
   linearOauthRedirectUri?: string;
   linearTokenStorePath?: string;
-  reconcileStatePath?: string;
   repoByTeam?: Record<string, string>;
   repoByProject?: Record<string, string>;
   defaultDir?: string;
