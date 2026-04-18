@@ -5,6 +5,7 @@ import {
   buildPromptedDuplicateKey,
   hydrateTriggerPromptFromCommentHint,
   isBootstrapCommentCandidate,
+  recoverTriggerFromReconcilePlan,
   rememberCommentPromptHint,
   resetCommentPromptHintState,
   resetPromptedDuplicateState,
@@ -258,4 +259,101 @@ test("does not override an existing prompt when comment hint exists", async () =
 
   assert.equal(hydrated.prompt, "новий prompt");
   assert.equal(hydrated.commentId, "");
+});
+
+test("recoverTriggerFromReconcilePlan prefers latest unhandled prompt activity", () => {
+  const trigger = makeIssueTrigger({
+    source: "agent-session",
+    kind: "AgentSessionEvent",
+    action: "created",
+    prompt: "",
+    eventKey: "linear:session:sess:created",
+    commentId: "",
+  });
+
+  const recovered = recoverTriggerFromReconcilePlan({
+    trigger,
+    snapshot: {
+      sessionId: "sess",
+      status: "active",
+      issue: {
+        id: "issue",
+        identifier: "LUK-770",
+        title: "Feature",
+        description: "",
+        url: "",
+        teamKey: "LUK",
+        projectKey: "bridge",
+      },
+      comment: { id: "comment-root", body: "root body", parentId: "" },
+      sourceComment: { id: "comment-source", body: "source body", parentId: "" },
+      activities: [],
+    },
+    plan: {
+      promptTriggers: [
+        {
+          ...makeIssueTrigger({
+            source: "agent-session",
+            kind: "AgentSessionEvent",
+            action: "prompted",
+            prompt: "first prompt",
+            eventKey: "linear:activity:a1",
+            activityId: "a1",
+            commentId: "comment-source",
+          }),
+        },
+        {
+          ...makeIssueTrigger({
+            source: "agent-session",
+            kind: "AgentSessionEvent",
+            action: "prompted",
+            prompt: "second prompt",
+            eventKey: "linear:activity:a2",
+            activityId: "a2",
+            commentId: "comment-source",
+          }),
+        },
+      ],
+    },
+  });
+
+  assert.equal(recovered.eventKey, "linear:activity:a2");
+  assert.equal(recovered.prompt, "second prompt");
+});
+
+test("recoverTriggerFromReconcilePlan falls back to source comment body for created turn", () => {
+  const trigger = makeIssueTrigger({
+    source: "agent-session",
+    kind: "AgentSessionEvent",
+    action: "created",
+    prompt: "",
+    eventKey: "linear:session:sess:created",
+    commentId: "",
+  });
+
+  const recovered = recoverTriggerFromReconcilePlan({
+    trigger,
+    snapshot: {
+      sessionId: "sess",
+      status: "active",
+      issue: {
+        id: "issue",
+        identifier: "LUK-770",
+        title: "Feature",
+        description: "",
+        url: "",
+        teamKey: "LUK",
+        projectKey: "bridge",
+      },
+      comment: { id: "comment-root", body: "", parentId: "" },
+      sourceComment: { id: "comment-source", body: "first user message", parentId: "" },
+      activities: [],
+    },
+    plan: {
+      promptTriggers: [],
+    },
+  });
+
+  assert.equal(recovered.prompt, "first user message");
+  assert.equal(recovered.commentId, "comment-source");
 });

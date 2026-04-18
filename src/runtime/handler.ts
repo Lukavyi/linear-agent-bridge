@@ -45,6 +45,8 @@ import {
 import {
   buildReconcilePlan,
   loadReconcileSnapshot,
+  type ReconcilePlan,
+  type SessionReconcileSnapshot,
 } from "./reconcile.js";
 import {
   isDurablyProcessedEvent,
@@ -61,6 +63,7 @@ const BOOTSTRAP_DUPLICATE_WINDOW_MS = 5000;
 const PROMPTED_DUPLICATE_WINDOW_MS = 5000;
 const COMMENT_PROMPT_HINT_TTL_MS = 2 * 60 * 1000;
 const MISSING_PROMPT_HINT_DELAYS_MS = [0, 250, 500, 1000];
+const AUTO_RECONCILE_PROMPT_DELAYS_MS = [0, 250, 1000, 2500];
 
 const sessionQueues = new Map<string, Promise<void>>();
 const recentEventKeys = new Map<string, number>();
@@ -494,6 +497,84 @@ export async function hydrateTriggerPromptFromCommentHint(
   return trigger;
 }
 
+export function recoverTriggerFromReconcilePlan(input: {
+  trigger: LinearTrigger;
+  snapshot: SessionReconcileSnapshot;
+  plan: ReconcilePlan;
+}): LinearTrigger {
+  const { trigger, snapshot, plan } = input;
+  if (trigger.prompt.trim()) return trigger;
+
+  const recoveredPromptTrigger = plan.promptTriggers.at(-1);
+  if (recoveredPromptTrigger) return recoveredPromptTrigger;
+
+  if (trigger.action !== "created") return trigger;
+
+  const fallbackPrompt =
+    snapshot.sourceComment.body.trim() ||
+    snapshot.comment.body.trim();
+  if (!fallbackPrompt) return trigger;
+
+  return {
+    ...trigger,
+    prompt: fallbackPrompt,
+    commentId:
+      trigger.commentId ||
+      snapshot.sourceComment.id ||
+      snapshot.comment.id,
+  };
+}
+
+async function hydrateTriggerPromptFromReconcile(
+  api: OpenClawPluginApi,
+  cfg: PluginConfig,
+  trigger: LinearTrigger,
+  delaysMs: number[] = AUTO_RECONCILE_PROMPT_DELAYS_MS,
+): Promise<LinearTrigger> {
+  if (trigger.prompt.trim()) return trigger;
+
+  for (let index = 0; index < delaysMs.length; index += 1) {
+    const delayMs = delaysMs[index] ?? 0;
+    if (delayMs > 0) await sleep(delayMs);
+
+    const snapshot = await loadReconcileSnapshot(api, cfg, {
+      sessionId: trigger.sessionId,
+      includeCreated: trigger.action === "created",
+    });
+    if (!snapshot) continue;
+
+    const plan = buildReconcilePlan({
+      snapshot,
+      includeCreated: trigger.action === "created",
+      isEventProcessed: (eventKey) =>
+        eventKey !== trigger.eventKey && hasRecentKey(recentEventKeys, eventKey),
+    });
+
+    const filteredPromptTriggers: LinearTrigger[] = [];
+    for (const candidate of plan.promptTriggers) {
+      if (candidate.eventKey === trigger.eventKey) continue;
+      if (await isDurablyProcessedEvent(cfg, candidate.eventKey)) continue;
+      filteredPromptTriggers.push(candidate);
+    }
+
+    const recovered = recoverTriggerFromReconcilePlan({
+      trigger,
+      snapshot,
+      plan: {
+        ...plan,
+        promptTriggers: filteredPromptTriggers,
+      },
+    });
+
+    if (recovered.eventKey !== trigger.eventKey) {
+      markRecentKey(recentEventKeys, recovered.eventKey);
+    }
+    if (recovered.prompt.trim()) return recovered;
+  }
+
+  return trigger;
+}
+
 function extractCommentPromptHintText(
   trigger: LinearTrigger,
   payload: Record<string, unknown>,
@@ -605,11 +686,20 @@ async function executeTurn(
   cfg: PluginConfig,
   inputTrigger: LinearTrigger,
 ): Promise<void> {
-  const trigger = await hydrateTriggerPromptFromCommentHint(inputTrigger);
+  let trigger = await hydrateTriggerPromptFromCommentHint(inputTrigger);
   if (!inputTrigger.prompt.trim() && trigger.prompt.trim()) {
     api.logger.info?.(
       `linear runtime: hydrated missing prompt from comment hint session=${trigger.sessionId}`,
     );
+  }
+  if (!trigger.prompt.trim()) {
+    const recovered = await hydrateTriggerPromptFromReconcile(api, cfg, trigger);
+    if (!trigger.prompt.trim() && recovered.prompt.trim()) {
+      api.logger.info?.(
+        `linear runtime: auto-recovered missing prompt from reconcile session=${recovered.sessionId} event=${recovered.eventKey}`,
+      );
+    }
+    trigger = recovered;
   }
   const state = getSessionRunState(trigger.sessionId);
   const runId = state.nextRunId + 1;
