@@ -30,17 +30,11 @@ test("buildTurnMessage includes history, workspace, and current turn", () => {
       prompt: "Пофікси будь ласка Linear bridge",
       promptContext: "Issue discussion",
       guidance: "Keep it concise",
-      subjectType: "issue",
-      subjectId: "issue-123",
-      subjectLabel: "LUK-123 Fix Linear bridge",
-      subjectUrl: "https://linear.app/test/issue/LUK-123",
       issueId: "issue-123",
       issueIdentifier: "LUK-123",
       issueTitle: "Fix Linear bridge",
       issueDescription: "",
       issueUrl: "https://linear.app/test/issue/LUK-123",
-      projectId: "project-1",
-      projectName: "done camp",
       teamKey: "LUK",
       projectKey: "done-camp",
       commentId: "",
@@ -75,17 +69,11 @@ test("buildTurnMessage falls back to latest prompt activity when webhook prompt 
       prompt: "",
       promptContext: "",
       guidance: "",
-      subjectType: "issue",
-      subjectId: "issue-456",
-      subjectLabel: "LUK-456 Investigate prompt hydration",
-      subjectUrl: "",
       issueId: "issue-456",
       issueIdentifier: "LUK-456",
       issueTitle: "Investigate prompt hydration",
       issueDescription: "",
       issueUrl: "",
-      projectId: "",
-      projectName: "",
       teamKey: "LUK",
       projectKey: "",
       commentId: "",
@@ -100,42 +88,4 @@ test("buildTurnMessage falls back to latest prompt activity when webhook prompt 
 
   assert.match(message, /Current user turn:\nНі, давай йти до сліди/);
   assert.doesNotMatch(message, /No direct prompt body was included in the webhook/);
-});
-
-test("buildTurnMessage falls back to project context when there is no issue", () => {
-  const message = buildTurnMessage({
-    cfg: { defaultDir: "/tmp/default" },
-    trigger: {
-      source: "comment",
-      kind: "Comment",
-      action: "prompted",
-      sessionId: "session-project-1",
-      eventKey: "linear:comment:comment-project-1",
-      webhookId: "",
-      deliveryId: "delivery-project-1",
-      signal: "",
-      prompt: "Перевір project comments",
-      promptContext: "Project discussion",
-      guidance: "",
-      subjectType: "project",
-      subjectId: "project-1",
-      subjectLabel: "linear-agent-bridge + linear-proxy",
-      subjectUrl: "https://linear.app/test/project/bridge",
-      issueId: "",
-      issueIdentifier: "",
-      issueTitle: "",
-      issueDescription: "",
-      issueUrl: "",
-      projectId: "project-1",
-      projectName: "linear-agent-bridge + linear-proxy",
-      teamKey: "LUK",
-      projectKey: "bridge",
-      commentId: "comment-project-1",
-      activityId: "",
-    },
-    history: [],
-  });
-
-  assert.match(message, /- Project: linear-agent-bridge \+ linear-proxy/);
-  assert.match(message, /- Subject URL: https:\/\/linear.app\/test\/project\/bridge/);
 });

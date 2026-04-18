@@ -174,7 +174,6 @@ function buildPromptTrigger(
 }
 
 function baseTrigger(snapshot: SessionReconcileSnapshot): LinearTrigger {
-  const subjectLabel = `${snapshot.issue.identifier} ${snapshot.issue.title}`.trim();
   return {
     source: "agent-session",
     kind: "AgentSessionEvent",
@@ -187,17 +186,11 @@ function baseTrigger(snapshot: SessionReconcileSnapshot): LinearTrigger {
     prompt: "",
     promptContext: "",
     guidance: "",
-    subjectType: snapshot.issue.id ? "issue" : "unknown",
-    subjectId: snapshot.issue.id,
-    subjectLabel,
-    subjectUrl: snapshot.issue.url,
     issueId: snapshot.issue.id,
     issueIdentifier: snapshot.issue.identifier,
     issueTitle: snapshot.issue.title,
     issueDescription: snapshot.issue.description,
     issueUrl: snapshot.issue.url,
-    projectId: "",
-    projectName: "",
     teamKey: snapshot.issue.teamKey,
     projectKey: snapshot.issue.projectKey,
     commentId: snapshot.comment.id || snapshot.sourceComment.id,

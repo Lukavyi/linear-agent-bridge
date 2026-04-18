@@ -27,17 +27,11 @@ function makeIssueTrigger(overrides: Record<string, unknown> = {}) {
     prompt: "hi",
     promptContext: "",
     guidance: "",
-    subjectType: "issue" as const,
-    subjectId: "issue",
-    subjectLabel: "LUK-770 Feature",
-    subjectUrl: "",
     issueId: "issue",
     issueIdentifier: "LUK-770",
     issueTitle: "Feature",
     issueDescription: "",
     issueUrl: "",
-    projectId: "",
-    projectName: "",
     teamKey: "",
     projectKey: "",
     commentId: "comment",
@@ -137,18 +131,6 @@ test("ignores normal native-session comment triggers but keeps artificial bootst
         type: "Comment",
         action: "create",
         isArtificialAgentSessionRoot: true,
-      },
-      trigger,
-    ),
-    false,
-  );
-
-  assert.equal(
-    shouldIgnoreNativeCommentTrigger(
-      {
-        type: "Comment",
-        action: "create",
-        fallbackAgentSessionBootstrap: true,
       },
       trigger,
     ),

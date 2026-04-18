@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 
 import {
   resolveSessionId,
-  shouldBootstrapProjectCommentSession,
   shouldDeferRootCommentCreateToNativeSession,
 } from "./session-resolver.js";
 
@@ -60,46 +59,6 @@ test("defers top-level comment creates to native session creation", () => {
     shouldDeferRootCommentCreateToNativeSession({
       isCreate: false,
       parentId: "",
-    }),
-    false,
-  );
-});
-
-test("bootstraps project-only root comments when native session is missing", () => {
-  assert.equal(
-    shouldBootstrapProjectCommentSession({
-      type: "Comment",
-      action: "create",
-      comment: {
-        id: "comment-project-1",
-        project: { id: "project-1", name: "Bridge" },
-      },
-    }),
-    true,
-  );
-
-  assert.equal(
-    shouldBootstrapProjectCommentSession({
-      type: "Comment",
-      action: "create",
-      comment: {
-        id: "comment-project-2",
-        issue: { id: "issue-1" },
-        project: { id: "project-1", name: "Bridge" },
-      },
-    }),
-    false,
-  );
-
-  assert.equal(
-    shouldBootstrapProjectCommentSession({
-      type: "Comment",
-      action: "create",
-      comment: {
-        id: "comment-project-3",
-        parentId: "parent-1",
-        project: { id: "project-1", name: "Bridge" },
-      },
     }),
     false,
   );

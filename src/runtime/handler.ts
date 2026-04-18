@@ -24,7 +24,6 @@ import {
 } from "../util.js";
 import { applyIssuePolicy } from "./issue-policy.js";
 import {
-  bootstrapSessionOnComment,
   rememberResolvedSessionHint,
   resolveSessionIdWithFallback,
 } from "./session-resolver.js";
@@ -395,7 +394,6 @@ export function shouldIgnoreNativeCommentTrigger(
 ): boolean {
   if (trigger.source !== "comment") return false;
   if (payload.isArtificialAgentSessionRoot === true) return false;
-  if (payload.fallbackAgentSessionBootstrap === true) return false;
   return Boolean(trigger.sessionId);
 }
 
@@ -642,12 +640,7 @@ async function resolveCommentSession(
     const sessionId = await resolveSessionIdWithFallback(api, cfg, payload);
     if (sessionId) return sessionId;
   }
-
-  const bootstrappedSessionId = await bootstrapSessionOnComment(api, cfg, payload);
-  if (bootstrappedSessionId) {
-    payload.fallbackAgentSessionBootstrap = true;
-  }
-  return bootstrappedSessionId;
+  return "";
 }
 
 function enqueueSessionTurn(
@@ -1037,8 +1030,6 @@ function buildLabel(trigger: LinearTrigger): string {
   }
   if (trigger.issueIdentifier) return `Linear ${trigger.issueIdentifier}`;
   if (trigger.issueTitle) return `Linear ${trigger.issueTitle}`.slice(0, 80);
-  if (trigger.subjectLabel) return `Linear ${trigger.subjectLabel}`.slice(0, 80);
-  if (trigger.projectName) return `Linear ${trigger.projectName}`.slice(0, 80);
   return "Linear";
 }
 
@@ -1050,10 +1041,7 @@ function buildThinkingText(trigger: LinearTrigger): string {
 }
 
 function buildStopText(trigger: LinearTrigger): string {
-  const target =
-    `${trigger.issueIdentifier} ${trigger.issueTitle}`.trim() ||
-    trigger.subjectLabel ||
-    trigger.projectName;
+  const target = `${trigger.issueIdentifier} ${trigger.issueTitle}`.trim();
   if (target) {
     return `Stop request received. I will not continue the current run for ${target}.`;
   }

@@ -35,8 +35,10 @@ export function buildTurnMessage(input: {
     `- Session ID: ${trigger.sessionId}`,
     `- Source: ${trigger.source}`,
     `- Action: ${trigger.action}`,
-    formatSubjectLine(trigger),
-    formatSubjectUrlLine(trigger),
+    trigger.issueIdentifier || trigger.issueTitle
+      ? `- Issue: ${`${trigger.issueIdentifier} ${trigger.issueTitle}`.trim()}`
+      : "",
+    trigger.issueUrl ? `- Issue URL: ${trigger.issueUrl}` : "",
     workspace ? `- Suggested workspace: ${workspace}` : "",
     trigger.guidance ? `- Guidance: ${trigger.guidance}` : "",
     "",
@@ -101,26 +103,4 @@ function resolveSuggestedWorkspace(
     return cfg.repoByTeam[trigger.teamKey];
   }
   return cfg.defaultDir ?? "";
-}
-
-function formatSubjectLine(trigger: LinearTrigger): string {
-  if (trigger.issueIdentifier || trigger.issueTitle) {
-    return `- Issue: ${`${trigger.issueIdentifier} ${trigger.issueTitle}`.trim()}`;
-  }
-  if (trigger.subjectType === "project-update") {
-    return `- Project update: ${trigger.subjectLabel || trigger.projectName || trigger.subjectId}`;
-  }
-  if (trigger.projectName || trigger.subjectType === "project") {
-    return `- Project: ${trigger.projectName || trigger.subjectLabel || trigger.projectId}`;
-  }
-  if (trigger.subjectLabel) {
-    return `- Subject: ${trigger.subjectLabel}`;
-  }
-  return "";
-}
-
-function formatSubjectUrlLine(trigger: LinearTrigger): string {
-  if (trigger.issueUrl) return `- Issue URL: ${trigger.issueUrl}`;
-  if (trigger.subjectUrl) return `- Subject URL: ${trigger.subjectUrl}`;
-  return "";
 }
