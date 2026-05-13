@@ -2,7 +2,7 @@ import type { OpenClawPluginApi } from "./src/types.js";
 import { createLinearWebhook } from "./src/runtime/handler.js";
 import { createLinearOauthRoute } from "./src/oauth/route.js";
 
-export default function register(api: OpenClawPluginApi): void {
+function register(api: OpenClawPluginApi): void {
   api.registerHttpRoute({
     path: "/plugins/linear/linear",
     handler: createLinearWebhook(api),
@@ -21,3 +21,10 @@ export default function register(api: OpenClawPluginApi): void {
     auth: "plugin" as const,
   });
 }
+
+export default {
+  id: "linear-agent-bridge",
+  name: "Linear",
+  description: "Linear conversational bridge for the OpenClaw main agent",
+  register,
+};

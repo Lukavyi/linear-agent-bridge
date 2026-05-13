@@ -2,6 +2,9 @@
   "id": "linear-agent-bridge",
   "name": "Linear",
   "description": "Linear conversational bridge for the OpenClaw main agent",
+  "activation": {
+    "onStartup": true
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
