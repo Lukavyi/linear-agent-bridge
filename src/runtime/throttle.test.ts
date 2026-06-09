@@ -3,87 +3,75 @@ import assert from "node:assert/strict";
 
 import { ThoughtThrottler } from "./throttle.js";
 
-const MIN = 2500;
+function drain(t: ThoughtThrottler, bodies: string[]): string[] {
+  const out: string[] = [];
+  for (const b of bodies) for (const e of t.push(b)) out.push(e.body);
+  for (const e of t.flush()) out.push(e.body);
+  return out;
+}
 
-test("leading edge: the first thought emits immediately", () => {
+test("every distinct command is emitted, in order", () => {
   const t = new ThoughtThrottler();
-  assert.deepEqual(t.push("reading file", 0), [{ body: "reading file", count: 1 }]);
+  assert.deepEqual(drain(t, ["ls ~", "pwd", "cat a", "grep x"]), [
+    "ls ~",
+    "pwd",
+    "cat a",
+    "grep x",
+  ]);
 });
 
-test("minimum interval: a second thought inside the window does not emit", () => {
+test("a duplicate is the exact same command back-to-back — those coalesce with a count", () => {
   const t = new ThoughtThrottler();
-  t.push("a", 0);
-  assert.deepEqual(t.push("b", 100), []); // 100ms < 2500ms
-  assert.deepEqual(t.push("c", MIN - 1), []);
+  assert.deepEqual(drain(t, ["reading file", "reading file", "reading file"]), [
+    "reading file (×3)",
+  ]);
 });
 
-test("a thought past the window emits the held pending, then leads again", () => {
+test("different args are NOT duplicates (ls ~ then ls / both show)", () => {
   const t = new ThoughtThrottler();
-  assert.deepEqual(t.push("a", 0), [{ body: "a", count: 1 }]); // leading
-  assert.deepEqual(t.push("b", 100), []); // pending = b
-  // Next push past the window flushes pending b; c becomes the new pending.
-  assert.deepEqual(t.push("c", MIN + 100), [{ body: "b", count: 1 }]);
-  assert.deepEqual(t.flush(), [{ body: "c", count: 1 }]);
+  assert.deepEqual(drain(t, ["Running terminal: ls ~", "Running terminal: ls /"]), [
+    "Running terminal: ls ~",
+    "Running terminal: ls /",
+  ]);
 });
 
-test("adjacent repeats coalesce into one thought with a count", () => {
+test("only consecutive identicals coalesce; a later repeat is its own thought", () => {
   const t = new ThoughtThrottler();
-  t.push("a", 0); // leading emit
-  t.push("reading file", 100); // pending, count 1
-  t.push("reading file", 150); // count 2
-  t.push("reading file", 200); // count 3
-  assert.deepEqual(t.flush(), [{ body: "reading file (×3)", count: 3 }]);
+  // a, a → a(×2); then b; then a again → separate a.
+  assert.deepEqual(drain(t, ["a", "a", "b", "a"]), ["a (×2)", "b", "a"]);
 });
 
-test("a burst of 20 events within 100ms emits at most one thought", () => {
+test("a distinct command emits when the next one arrives; the last on flush", () => {
   const t = new ThoughtThrottler();
-  const emitted: string[] = [];
-  for (let i = 0; i < 20; i += 1) {
-    for (const e of t.push(`event ${i}`, i * 5)) emitted.push(e.body); // 0..95ms
-  }
-  assert.equal(emitted.length, 1);
-  assert.equal(emitted[0], "event 0"); // leading edge
+  assert.deepEqual(t.push("first"), []); // held
+  assert.deepEqual(t.push("second"), [{ body: "first", count: 1 }]);
+  assert.deepEqual(t.flush(), [{ body: "second", count: 1 }]);
 });
 
-test("the final pending event is always flushed", () => {
+test("flush is a no-op once drained", () => {
   const t = new ThoughtThrottler();
-  t.push("a", 0); // leading
-  t.push("tail", 200); // held
-  assert.deepEqual(t.flush(), [{ body: "tail", count: 1 }]);
-});
-
-test("flush is a no-op when nothing is pending", () => {
-  const t = new ThoughtThrottler();
-  t.push("a", 0);
+  t.push("a");
+  assert.deepEqual(t.flush(), [{ body: "a", count: 1 }]);
   assert.deepEqual(t.flush(), []);
 });
 
-test("cancel drops the pending thought and silences further pushes", () => {
+test("cancel drops the held thought and silences further pushes", () => {
   const t = new ThoughtThrottler();
-  t.push("a", 0);
-  t.push("held", 100);
+  t.push("a");
   t.cancel();
   assert.deepEqual(t.flush(), []);
-  assert.deepEqual(t.push("after", MIN * 10), []);
+  assert.deepEqual(t.push("b"), []);
 });
 
 test("blank thoughts are ignored", () => {
   const t = new ThoughtThrottler();
-  assert.deepEqual(t.push("   ", 0), []);
-  assert.deepEqual(t.push("", 100), []);
+  assert.deepEqual(t.push("   "), []);
+  assert.deepEqual(t.push(""), []);
+  assert.deepEqual(t.flush(), []);
 });
 
-test("a different thought inside the window replaces the pending slot (last wins)", () => {
+test("a burst of distinct commands loses none", () => {
   const t = new ThoughtThrottler();
-  t.push("a", 0); // leading
-  t.push("b", 100); // pending b
-  t.push("c", 200); // pending replaced with c
-  assert.deepEqual(t.flush(), [{ body: "c", count: 1 }]);
-});
-
-test("respects a custom minimum interval", () => {
-  const t = new ThoughtThrottler({ minIntervalMs: 1000 });
-  assert.deepEqual(t.push("a", 0), [{ body: "a", count: 1 }]);
-  assert.deepEqual(t.push("b", 500), []); // within 1000
-  assert.deepEqual(t.push("c", 1000), [{ body: "b", count: 1 }]); // window elapsed
+  const cmds = Array.from({ length: 20 }, (_, i) => `cmd ${i}`);
+  assert.deepEqual(drain(t, cmds), cmds);
 });
