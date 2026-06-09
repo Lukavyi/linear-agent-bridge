@@ -1,46 +1,71 @@
 # linear-agent-bridge
 
-[![Linear to OpenClaw session mapping demo](./media/linear-agent-sessions-demo.gif)](./media/linear-agent-sessions-demo.mp4)
+[![Linear agent session mapping demo](./media/linear-agent-sessions-demo.gif)](./media/linear-agent-sessions-demo.mp4)
 
 Full demo video: [`media/linear-agent-sessions-demo.mp4`](./media/linear-agent-sessions-demo.mp4)
 
-An OpenClaw plugin that maps each Linear Agent Session to its own persistent OpenClaw conversation.
+A bridge that maps each Linear Agent Session to its own persistent conversation on a backend agent runtime. Two backends are supported behind one `Gateway` abstraction:
 
-One Linear issue can contain many separate Agent Sessions, and each of those sessions maps to a separate OpenClaw session key. That means you can create as many independent agent threads as you want inside the same issue without mixing their context.
+- **OpenClaw** — runs as `@Clawd`, the original backend.
+- **Hermes** ([NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)) — runs as `@Hermes`, talking to the Hermes `api_server`.
 
-This repo is for the plugin runtime itself. It is not a full infrastructure guide for every possible ingress setup.
+One Linear issue can contain many separate Agent Sessions, and each maps to a separate backend session key. That means you can create as many independent agent threads as you want inside the same issue without mixing their context.
 
-## What the live plugin does
+The same codebase powers both personas; you pick the backend per deployment with the `BACKEND` env var (`openclaw` | `hermes`). This repo is the bridge runtime itself — it is not a full infrastructure guide for every possible ingress setup.
+
+## Backends
+
+The runtime talks to its backend through a single `Gateway` interface (`src/runtime/gateway-types.ts`). The `BACKEND` env var selects the implementation:
+
+| `BACKEND`  | Persona  | Gateway              | Talks to                                  |
+| ---------- | -------- | -------------------- | ----------------------------------------- |
+| `openclaw` | `@Clawd` | `OpenClawGateway`    | OpenClaw (plugin host or HTTP gateway)    |
+| `hermes`   | `@Hermes`| `HermesGateway`      | Hermes `api_server` (OpenAI-compatible)   |
+
+`BACKEND` defaults to `openclaw` when unset and fails fast on any unknown value. The selector lives in `src/runtime/backend.ts` — the one place to register a new backend's gateway.
+
+Both gateways feed the same universal event mapper (`src/runtime/event-mapper.ts`), so each one produces the same Linear activity shapes (`thought`, `response`, `error`) regardless of which runtime executed the turn.
+
+## Run modes
+
+The bridge runs in one of two modes, sharing the same plugin core:
+
+- **As an OpenClaw plugin** (`index.ts`) — the OpenClaw host supplies the HTTP router, logger, and config, and registers the plugin's routes. Used by the `@Clawd` deployment.
+- **As a standalone HTTP server** (`server.ts`, started via `npm start` → `node dist/server.js`) — a minimal Node `http` server provides the same `OpenClawPluginApi` surface (router, console logger, config from env) and runs the plugin's `register()`. Used by the `@Hermes` deployment, which has no OpenClaw to host it. With `BACKEND=hermes` the plugin never touches OpenClaw, so nothing here depends on a local OpenClaw.
+
+## What the bridge does
 
 - Receives Linear Agent Session webhooks on `/plugins/linear/linear`
 - Verifies webhook signatures and rejects stale payloads
-- Maps one Linear `AgentSession` to one stable OpenClaw session key
+- Maps one Linear `AgentSession` to one stable backend session key
 - Posts a fast visible `thought` activity as an acknowledgement
-- Runs one OpenClaw turn for each accepted Linear turn
+- Runs one backend turn (OpenClaw or Hermes) for each accepted Linear turn
 - Publishes exactly one final visible `response` or `error`
 - Uses `AgentSessionEvent` as the canonical trigger for native Linear session runs
 - Deduplicates known duplicate webhook combinations
 - Supports OAuth callback and code exchange routes for app installation
 - Optionally publishes post-run tool/file trace breadcrumbs when `linearDebugToolTrace=true`
 
-## What the live plugin does not do
+## What the bridge does not do
 
 - It does not register `/plugins/linear/api`
 - It does not expose `/hooks/linear`
-- It does not run a plugin-side Linear tool API proxy
+- It does not run a backend-side Linear tool API proxy
 - It does not treat Linear as a second tool runtime
 
-Linear is treated as a conversational surface. OpenClaw remains the runtime that actually executes the agent turn.
+Linear is treated as a conversational surface. The selected backend (OpenClaw or Hermes) remains the runtime that actually executes the agent turn.
 
 ## Registered routes
 
-`index.ts` registers only these routes:
+Both run modes register the same routes:
 
 - `/plugins/linear/linear`
 - `/plugins/linear/oauth/callback`
 - `/plugins/linear/oauth/exchange`
 
-If your public ingress uses a proxy or tunnel, it still needs to forward into those plugin routes.
+The standalone server additionally answers `GET /` and `GET /health` with a small JSON status payload for health checks.
+
+If your public ingress uses a proxy or tunnel, it still needs to forward into the plugin routes.
 
 ## Runtime model
 
@@ -49,12 +74,12 @@ The active runtime lives in `src/runtime/*`.
 High level flow:
 
 1. Linear sends a webhook to `/plugins/linear/linear`.
-2. The plugin validates the signature, normalizes the payload, and returns `202` quickly.
-3. The plugin resolves the Linear session identity and maps it to:
+2. The bridge validates the signature, normalizes the payload, and returns `202` quickly.
+3. The bridge resolves the Linear session identity and maps it to:
    `agent:<agentId>:linear:session:<linearSessionId>`
-4. The plugin posts an immediate visible `thought` activity.
-5. The plugin runs one OpenClaw turn against that stable session key.
-6. The plugin publishes exactly one terminal `response` or `error`.
+4. The bridge posts an immediate visible `thought` activity.
+5. The bridge runs one backend turn (via the selected `Gateway`) against that stable session key.
+6. The bridge publishes exactly one terminal `response` or `error`.
 
 For native Linear agent sessions, `AgentSessionEvent` is the canonical runtime trigger.
 
@@ -62,10 +87,10 @@ Comment webhooks may still be used for bootstrap/fallback lookup in edge cases, 
 
 ## Session model on normal-human terms
 
-- One Linear `AgentSession` = one isolated OpenClaw session.
+- One Linear `AgentSession` = one isolated backend session.
 - One Linear issue can have many separate `AgentSession`s.
-- If one Linear comment ends up spawning several `AgentSession`s, each one still gets its own OpenClaw session.
-- Follow-up turns inside the same Linear `AgentSession` continue the same OpenClaw session instead of mixing with the others.
+- If one Linear comment ends up spawning several `AgentSession`s, each one still gets its own backend session.
+- Follow-up turns inside the same Linear `AgentSession` continue the same backend session instead of mixing with the others.
 
 Why this is useful:
 
@@ -80,71 +105,84 @@ Linear issue LUK-123
 
 comment A
   -> AgentSession S1
-  -> OpenClaw session OC1
+  -> backend session B1
 
 comment B
   -> AgentSession S2
-  -> OpenClaw session OC2
+  -> backend session B2
   -> AgentSession S3
-  -> OpenClaw session OC3
+  -> backend session B3
 
 follow-up inside S2
-  -> continues OC2
+  -> continues B2
 ```
 
 ## Infrastructure shape
 
-The plugin only requires a public HTTPS endpoint that ultimately reaches the registered plugin routes.
+The bridge only requires a public HTTPS endpoint that ultimately reaches the registered routes. The backend runtime (OpenClaw or Hermes) sits behind the bridge and stays off the public internet.
 
-Direct setup:
-
-```text
-Linear
-  -> public HTTPS
-  -> OpenClaw
-  -> /plugins/linear/linear
-  -> linear-agent-bridge
-```
-
-Common proxied setup:
+`@Clawd` (OpenClaw plugin):
 
 ```text
 Linear
   -> public HTTPS
-  -> cloudflared
-  -> optional thin proxy
-  -> OpenClaw
+  -> OpenClaw (hosts the plugin)
   -> /plugins/linear/linear
   -> linear-agent-bridge
 ```
 
-A proxy such as `linear-proxy` is optional. It can be useful for ingress logging, header preservation, or TLS/front-door separation, but the plugin itself does not depend on having a separate proxy layer.
+`@Hermes` (standalone server):
+
+```text
+Linear
+  -> public HTTPS
+  -> linear-agent-bridge (server.ts)
+  -> /plugins/linear/linear
+  -> Hermes api_server (private network)
+```
+
+The two personas are intended to run as two separate deployments of this same codebase, differing only by env (`BACKEND`, OAuth app, webhook secret, backend URL). A standalone front proxy/tunnel is optional — useful for ingress logging or TLS separation, but the bridge does not depend on one.
 
 ## Configuration
 
-The active config surface is defined in `openclaw.plugin.json`.
+When running **as an OpenClaw plugin**, the config surface is defined in `openclaw.plugin.json`. When running **as a standalone server**, the same settings are read from environment variables (the server maps env keys onto the plugin config; see `server.ts`).
 
-Core runtime settings:
+### Backend selection
 
-- `agentId` - OpenClaw agent id to run, default `main`
-- `devAgentId` - legacy alias for `agentId`
-- `linearWebhookSecret` - required for webhook verification
-- `linearApiKey` - direct Linear token for GraphQL calls
-- `linearOauthClientId`
-- `linearOauthClientSecret`
-- `linearOauthRedirectUri`
-- `linearTokenStorePath` - persisted OAuth token storage
-- `openclawProvider` - provider override, default `openai`
-- `openclawModel` - model override, default `gpt-5.4`
-- `openclawThinking` - thinking override, default `high`
-- `delegateOnCreate` - optionally auto-delegate on session create
-- `startOnCreate` - optionally move issue to started on session create
-- `repoByTeam` - workspace hints by Linear team
-- `repoByProject` - workspace hints by Linear project
-- `defaultDir` - default workspace hint when no mapping matches
-- `externalUrlBase` - optional external session link template
-- `externalUrlLabel` - label for the external link
-- `linearDebugToolTrace` - when true, publish visible tool/file trace breadcrumbs after runs
+- `BACKEND` - `openclaw` (default) or `hermes`
+
+### Hermes backend (`BACKEND=hermes`)
+
+- `HERMES_URL` - base URL of the Hermes `api_server`, e.g. `http://hermes-agent.railway.internal:8642` (required)
+- `HERMES_API_KEY` - bearer token; must equal the Hermes service `API_SERVER_KEY` (required)
+- `HERMES_MODEL` - OpenAI-compatible model name Hermes expects (optional; has a default)
+
+### OpenClaw backend (`BACKEND=openclaw`)
+
+- `agentId` / `AGENT_ID` - OpenClaw agent id to run, default `main`
+- `devAgentId` / `DEV_AGENT_ID` - legacy alias for `agentId`
+- `openclawProvider` / `OPENCLAW_PROVIDER` - provider override, default `openai`
+- `openclawModel` / `OPENCLAW_MODEL` - model override, default `gpt-5.4`
+- `openclawThinking` / `OPENCLAW_THINKING` - thinking override, default `high`
+
+### Linear (both backends)
+
+- `linearWebhookSecret` / `LINEAR_WEBHOOK_SECRET` - required for webhook verification
+- `linearApiKey` / `LINEAR_API_KEY` - direct Linear token for GraphQL calls
+- `linearOauthClientId` / `LINEAR_OAUTH_CLIENT_ID`
+- `linearOauthClientSecret` / `LINEAR_OAUTH_CLIENT_SECRET`
+- `linearOauthRedirectUri` / `LINEAR_OAUTH_REDIRECT_URI`
+- `linearTokenStorePath` / `LINEAR_TOKEN_STORE_PATH` - persisted OAuth token storage
+- `delegateOnCreate` / `DELEGATE_ON_CREATE` - optionally auto-delegate on session create
+- `startOnCreate` / `START_ON_CREATE` - optionally move issue to started on session create
+- `repoByTeam` / `REPO_BY_TEAM` - workspace hints by Linear team (JSON map in env form)
+- `repoByProject` / `REPO_BY_PROJECT` - workspace hints by Linear project (JSON map in env form)
+- `defaultDir` / `DEFAULT_DIR` - default workspace hint when no mapping matches
+- `externalUrlBase` / `EXTERNAL_URL_BASE` - optional external session link template
+- `externalUrlLabel` / `EXTERNAL_URL_LABEL` - label for the external link
+- `linearDebugToolTrace` / `LINEAR_DEBUG_TOOL_TRACE` - when true, publish visible tool/file trace breadcrumbs after runs
+
+The standalone server also accepts a `PLUGIN_CONFIG_JSON` blob as a config base (explicit env keys override it), `PORT` (default `8080`), and `LINEAR_DEBUG=1` to enable debug logging.
 
 ### Compatibility note
 
@@ -152,7 +190,7 @@ Core runtime settings:
 
 ## Tool trace mode
 
-When `linearDebugToolTrace=true`, the plugin fetches recent OpenClaw chat history after a run and publishes compact Linear `thought` activities summarizing tool usage for the current turn.
+When `linearDebugToolTrace=true` (OpenClaw backend), the bridge fetches recent OpenClaw chat history after a run and publishes compact Linear `thought` activities summarizing tool usage for the current turn.
 
 Examples:
 
@@ -169,9 +207,9 @@ npm run build
 npm test
 ```
 
-Compiled output goes to `dist/`.
+Compiled output goes to `dist/`. Run the standalone server with `npm start`.
 
-## Local install
+## Local install (OpenClaw plugin)
 
 Typical local extension path:
 
@@ -189,13 +227,19 @@ The plugin id remains `linear-agent-bridge`.
 4. Mention or delegate the app in a Linear issue.
 5. Confirm:
    - a visible `thought` appears quickly
-   - only one OpenClaw run happens for the turn
+   - only one backend run happens for the turn
    - exactly one final visible `response` or `error` is published
    - follow-up prompts continue the same conversation
 
 ## Files that matter
 
-- `index.ts` - registers the live webhook and OAuth routes
+- `index.ts` - plugin entry; registers the live webhook and OAuth routes
+- `server.ts` - standalone HTTP server entry (used by the Hermes deployment)
+- `src/runtime/backend.ts` - `BACKEND` selector that returns the active `Gateway`
+- `src/runtime/gateway-types.ts` - the `Gateway` interface and shared event/result types
+- `src/runtime/openclaw-gateway.ts` - OpenClaw `Gateway` implementation
+- `src/runtime/hermes-gateway.ts` - Hermes `Gateway` implementation (`api_server`)
+- `src/runtime/event-mapper.ts` - maps gateway events to Linear activity payloads
 - `src/runtime/handler.ts` - active native Linear runtime and dedupe logic
 - `src/runtime/payload.ts` - webhook normalization and trigger extraction
 - `src/runtime/prompt.ts` - chat-first prompt shaping
@@ -204,6 +248,8 @@ The plugin id remains `linear-agent-bridge`.
 - `src/runtime/issue-policy.ts` - issue start/delegate policy on session create
 - `src/runtime/skip-filter.ts` - self-authored and system-echo filtering
 - `src/runtime/tool-trace.ts` - post-run tool/file trace summarization
+- `src/runtime/trace.ts` - correlation-id structured logging across phases
+- `src/runtime/redact.ts` - sensitive header/token redaction for logs
 - `src/runtime/validation.ts` - webhook signature validation
 - `src/linear-client.ts` - Linear GraphQL client
 - `src/oauth/*` - OAuth callback, exchange, refresh, and token storage
