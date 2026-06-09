@@ -536,6 +536,10 @@ async function executeTurn(
     backend: gateway.backend,
     action: trigger.action,
     issue: trigger.issueIdentifier,
+    // The inbound user message (truncated). Forensics for "the @-mention never
+    // reached the agent" — an empty value here pinpoints a lost/missing prompt
+    // (see BRIDGE-8) rather than leaving it invisible in the trace.
+    prompt: safePreview(trigger.prompt),
   });
   if (!inputTrigger.prompt.trim() && trigger.prompt.trim()) {
     api.logger.info?.(
