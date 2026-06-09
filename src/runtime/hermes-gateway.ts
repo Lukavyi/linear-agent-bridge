@@ -6,6 +6,8 @@ import type {
   GatewayResult,
   GatewayTurnInput,
 } from "./gateway-types.js";
+import { SseDecoder, type SseEvent } from "./sse.js";
+import { ThoughtThrottler } from "./throttle.js";
 
 /**
  * Resolved connection settings for the Hermes `api_server`.
@@ -14,30 +16,39 @@ import type {
  * `http://hermes-agent.railway.internal:8642`); `apiKey` is the Hermes
  * `API_SERVER_KEY`. `model` is the OpenAI-compatible model name Hermes expects
  * (default `hermes-agent`). `fetchImpl` is injectable so tests can run against
- * an in-process mock server.
+ * an in-process mock server. `now` is injectable so the throttler's timing is
+ * deterministic under test.
  */
 export interface HermesGatewayConfig {
   url: string;
   apiKey: string;
   model: string;
   fetchImpl: typeof fetch;
+  now: () => number;
 }
 
 const ACK_THOUGHT = "Working on it…";
 const DEFAULT_MODEL = "hermes-agent";
 
 /**
- * Minimal `HermesGateway` — the walking-skeleton backend for @Hermes.
+ * `HermesGateway` — the @Hermes backend, talking to Hermes' OpenAI-compatible
+ * `api_server` over the Responses API.
  *
- * Hermes' `api_server` is OpenAI-compatible, so one turn is a single
- * `POST /v1/chat/completions` (Bearer auth) carrying the bridge-built prompt as
- * the user message. The gateway emits an immediate ack `thought`, then the
- * model's reply (`choices[0].message.content`) as one `completion`.
+ * One turn is a single streaming `POST /v1/responses` (Bearer auth, `stream:
+ * true`). The gateway:
  *
- * Non-streaming and stateless by design — the bridge already folds session
- * history into the prompt. Intermediate tool-progress streaming and server-side
- * session continuity (`/v1/responses` + `previous_response_id`) are follow-up
- * slices; so are throttling, cancellation, and rich error mapping.
+ *   - emits an immediate ack `thought` so the Linear session shows life;
+ *   - surfaces tool-progress signals (`response.output_item.*` carrying
+ *     `function_call` items, plus Hermes' custom `hermes.tool.progress`) as
+ *     intermediate `thought`s, run through a {@link ThoughtThrottler} so a burst
+ *     of tool calls can't flood Linear's feed;
+ *   - accumulates assistant token deltas (`response.output_text.delta`) into the
+ *     final visible reply, emitted as one terminal `completion`.
+ *
+ * The Responses API stores conversation state server-side. The terminal
+ * `response.id` is returned as `GatewayResult.continuationId`; passing it back
+ * as `GatewayTurnInput.continuationId` (`previous_response_id`) resumes the same
+ * conversation on the next turn.
  */
 export function createHermesGateway(
   config?: Partial<HermesGatewayConfig>,
@@ -47,6 +58,7 @@ export function createHermesGateway(
   const model =
     (config?.model ?? process.env.HERMES_MODEL ?? "").trim() || DEFAULT_MODEL;
   const fetchImpl = config?.fetchImpl ?? globalThis.fetch;
+  const now = config?.now ?? Date.now;
 
   if (!url) {
     throw new Error(
@@ -72,71 +84,209 @@ export function createHermesGateway(
       // Immediate ack so the Linear session shows life before the model speaks.
       yield { type: "thought", body: ACK_THOUGHT };
 
-      const messages: Array<{ role: string; content: string }> = [];
+      const requestBody: Record<string, unknown> = {
+        model,
+        input: input.prompt,
+        stream: true,
+        store: true,
+      };
       const system = input.extraSystemPrompt.trim();
-      if (system) messages.push({ role: "system", content: system });
-      messages.push({ role: "user", content: input.prompt });
+      if (system) requestBody.instructions = system;
+      // Resume the server-side conversation when the runtime hands us a prior id.
+      if (input.continuationId) {
+        requestBody.previous_response_id = input.continuationId;
+      }
 
-      const res = await fetchImpl(`${url}/v1/chat/completions`, {
+      const res = await fetchImpl(`${url}/v1/responses`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
-          Accept: "application/json",
+          Accept: "text/event-stream",
         },
-        body: JSON.stringify({ model, messages, stream: false }),
+        body: JSON.stringify(requestBody),
         signal: input.signal,
       });
 
       if (!res.ok) {
         throw new Error(
-          `Hermes POST /v1/chat/completions failed: ${res.status} ${await safeText(res)}`,
+          `Hermes POST /v1/responses failed: ${res.status} ${await safeText(res)}`,
         );
       }
+      if (!res.body) {
+        throw new Error("Hermes POST /v1/responses returned no response body.");
+      }
 
-      const raw = await res.json().catch(() => undefined);
+      const throttler = new ThoughtThrottler();
+      const decoder = new SseDecoder();
+      const textDecoder = new TextDecoder();
+      const reader = res.body.getReader();
+      let replyBuf = "";
+      let responseId: string | undefined;
+      let lastResponseObject: unknown;
+      let streamError: string | undefined;
+
+      const handle = function* (sse: SseEvent): Generator<GatewayEvent> {
+        const data = parseEventData(sse.data);
+        switch (sse.event) {
+          case "response.created":
+          case "response.in_progress":
+          case "response.completed":
+          case "response.failed":
+          case "response.incomplete": {
+            const responseObj = readObject(readObject(data)?.response);
+            const id = readString(responseObj?.id);
+            if (id) responseId = id;
+            if (responseObj) lastResponseObject = responseObj;
+            if (sse.event === "response.failed") {
+              streamError =
+                readString(readObject(responseObj?.error)?.message) ??
+                "Hermes reported response.failed";
+            }
+            return;
+          }
+          case "response.output_text.delta": {
+            const delta = readString(readObject(data)?.delta);
+            if (delta) replyBuf += delta;
+            return;
+          }
+          case "response.output_item.added":
+          case "response.output_item.done": {
+            const label = toolProgressLabel(readObject(data)?.item);
+            if (label && sse.event === "response.output_item.added") {
+              yield* emitThoughts(throttler.push(label, now()));
+            }
+            return;
+          }
+          case "hermes.tool.progress": {
+            const label = hermesToolProgressLabel(data);
+            if (label) yield* emitThoughts(throttler.push(label, now()));
+            return;
+          }
+          case "error":
+          case "response.error": {
+            streamError =
+              readString(readObject(data)?.message) ??
+              (typeof sse.data === "string" ? sse.data : "Hermes stream error");
+            return;
+          }
+          default:
+            // Unknown event types are ignored (logged at debug, not fatal).
+            api.logger.debug?.(`hermes gateway: ignored SSE event=${sse.event}`);
+            return;
+        }
+      };
+
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = textDecoder.decode(value, { stream: true });
+          for (const sse of decoder.push(chunk)) yield* handle(sse);
+        }
+        for (const sse of decoder.flush()) yield* handle(sse);
+      } finally {
+        reader.releaseLock?.();
+      }
+
+      // Flush any thought held inside the throttle window.
+      yield* emitThoughts(throttler.flush());
+
+      if (streamError) {
+        throw new Error(`Hermes stream error: ${streamError}`);
+      }
+
+      const reply = (replyBuf || extractResponseText(lastResponseObject)).trim();
       api.logger.debug?.(
-        `hermes gateway: chat.completion received session=${input.sessionKey}`,
+        `hermes gateway: response complete session=${input.sessionKey} response_id=${responseId ?? "n/a"}`,
       );
-      const reply = extractChatReply(raw).trim();
       yield { type: "completion", body: reply };
       return {
         backend: "hermes",
         ok: Boolean(reply),
         reply,
-        raw,
+        raw: lastResponseObject,
+        continuationId: responseId,
       };
     },
   };
 }
 
-/**
- * Pulls the assistant reply from an OpenAI-compatible chat completion.
- *
- * `choices[0].message.content` is normally a string; some servers return an
- * array of content parts, so text parts are concatenated defensively.
- */
-export function extractChatReply(result: unknown): string {
-  const root = readObject(result);
-  if (!root) return "";
-  const firstChoice = readObject(readArray(root.choices)[0]);
-  const message = readObject(firstChoice?.message);
-  if (!message) return "";
-
-  const directText = readString(message.content);
-  if (directText) return directText;
-
-  const parts = readArray(message.content);
-  if (parts.length > 0) {
-    const texts: string[] = [];
-    for (const part of parts) {
-      const item = readObject(part);
-      const text = readString(item?.text);
-      if (text) texts.push(text);
-    }
-    return texts.join("");
+function* emitThoughts(emits: { body: string }[]): Generator<GatewayEvent> {
+  for (const emit of emits) {
+    yield { type: "thought", body: emit.body };
   }
-  return "";
+}
+
+/**
+ * Human-readable label for a Responses-API output item that represents tool
+ * activity. Returns `undefined` for non-tool items (e.g. plain `message`).
+ */
+export function toolProgressLabel(item: unknown): string | undefined {
+  const obj = readObject(item);
+  if (!obj) return undefined;
+  const type = readString(obj.type);
+  if (type === "function_call") {
+    const name = readString(obj.name) ?? "tool";
+    return `Running ${name}`;
+  }
+  if (type === "function_call_output") {
+    const name = readString(obj.name);
+    return name ? `Finished ${name}` : "Tool finished";
+  }
+  return undefined;
+}
+
+/** Label for Hermes' custom `hermes.tool.progress` SSE event. */
+export function hermesToolProgressLabel(data: unknown): string | undefined {
+  const obj = readObject(data);
+  if (!obj) return undefined;
+  const name =
+    readString(obj.tool) ?? readString(obj.name) ?? readString(obj.tool_name);
+  const status = readString(obj.status);
+  if (!name) return status ? `Working: ${status}` : undefined;
+  return status ? `${capitalize(status)} ${name}` : `Running ${name}`;
+}
+
+/**
+ * Pulls assistant text from a terminal Responses-API `response` object. Used as
+ * a fallback when no `output_text.delta` events were seen (non-streaming
+ * servers, or a response delivered whole on `response.completed`).
+ */
+export function extractResponseText(response: unknown): string {
+  const root = readObject(response);
+  if (!root) return "";
+
+  const direct = readString(root.output_text);
+  if (direct) return direct;
+
+  const texts: string[] = [];
+  for (const item of readArray(root.output)) {
+    const itemObj = readObject(item);
+    if (readString(itemObj?.type) !== "message") continue;
+    for (const part of readArray(itemObj?.content)) {
+      const partObj = readObject(part);
+      const type = readString(partObj?.type);
+      if (type === "output_text" || type === "text") {
+        const text = readString(partObj?.text);
+        if (text) texts.push(text);
+      }
+    }
+  }
+  return texts.join("");
+}
+
+function parseEventData(data: string): unknown {
+  if (!data) return undefined;
+  try {
+    return JSON.parse(data);
+  } catch {
+    return undefined;
+  }
+}
+
+function capitalize(value: string): string {
+  return value ? value[0].toUpperCase() + value.slice(1) : value;
 }
 
 function normalizeBaseUrl(raw: string | undefined): string {
