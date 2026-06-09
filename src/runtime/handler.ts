@@ -33,6 +33,11 @@ import { isSelfAuthoredComment } from "./skip-filter.js";
 import { verifySignature } from "./validation.js";
 import { readGatewayHistory } from "./gateway.js";
 import { createGateway } from "./backend.js";
+import {
+  loadContinuation,
+  resolveContinuationStorePath,
+  saveContinuation,
+} from "./continuation-store.js";
 import { mapGatewayEventToActivity } from "./event-mapper.js";
 import { logPhase, resolveCorrelationId } from "./trace.js";
 import { redactHeaders } from "./redact.js";
@@ -538,6 +543,34 @@ async function executeTurn(
   const sessionKey = buildOpenClawSessionKey(agentId, trigger.sessionId);
   let runStartedAtMs = Date.now();
 
+  // Hermes keeps conversation state server-side; resume it across follow-up
+  // prompts by replaying the prior turn's response id. Backends with their own
+  // session memory (OpenClaw) opt out — no store path, no continuation id.
+  const usesContinuation = gateway.backend === "hermes";
+  const continuationPath = usesContinuation
+    ? resolveContinuationStorePath(
+        cfg.hermesContinuationStorePath,
+        cfg.linearTokenStorePath,
+      )
+    : "";
+  let priorContinuationId: string | undefined;
+  if (usesContinuation) {
+    priorContinuationId = await loadContinuation(
+      continuationPath,
+      trigger.sessionId,
+    ).catch((error) => {
+      api.logger.warn?.(
+        `linear runtime: continuation load failed session=${trigger.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    });
+    if (priorContinuationId) {
+      api.logger.info?.(
+        `linear runtime: resuming hermes conversation session=${trigger.sessionId} previous_response_id=${priorContinuationId}`,
+      );
+    }
+  }
+
   try {
     const thought = await postActivity(
       api,
@@ -584,6 +617,7 @@ async function executeTurn(
       idempotencyKey: trigger.eventKey,
       extraSystemPrompt: buildExtraSystemPrompt(),
       timeoutMs: AGENT_TIMEOUT_MS,
+      continuationId: priorContinuationId,
       issue: trigger.issueId
         ? {
             id: trigger.issueId,
@@ -629,6 +663,21 @@ async function executeTurn(
     }
 
     api.logger.info?.(`linear runtime: raw gateway result ${safePreview(result?.raw)}`);
+
+    // Persist the backend's resume token so the next prompt in this Linear
+    // session continues the same server-side conversation.
+    if (usesContinuation && result?.continuationId) {
+      await saveContinuation(
+        continuationPath,
+        trigger.sessionId,
+        result.continuationId,
+      ).catch((error) => {
+        api.logger.warn?.(
+          `linear runtime: continuation save failed session=${trigger.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
+
     await maybePostToolTrace(api, cfg, trigger.sessionId, sessionKey, runStartedAtMs);
 
     const terminalEvent: GatewayCompletionEvent =

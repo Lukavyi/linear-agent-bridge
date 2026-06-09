@@ -76,6 +76,7 @@ function buildPluginConfig(): Record<string, unknown> {
   str("linearOauthClientSecret", "LINEAR_OAUTH_CLIENT_SECRET");
   str("linearOauthRedirectUri", "LINEAR_OAUTH_REDIRECT_URI");
   str("linearTokenStorePath", "LINEAR_TOKEN_STORE_PATH");
+  str("hermesContinuationStorePath", "HERMES_CONTINUATION_STORE_PATH");
   str("defaultDir", "DEFAULT_DIR");
   str("externalUrlBase", "EXTERNAL_URL_BASE");
   str("externalUrlLabel", "EXTERNAL_URL_LABEL");
