@@ -390,16 +390,22 @@ test("error path: a non-2xx Hermes response yields a terminal error activity", a
     const err = await bridge.linear.waitForActivity((a) => a.type === "error");
 
     assert.equal(err.type, "error");
-    assert.match(err.body ?? "", /Agent run failed/);
-    assert.match(err.body ?? "", /500/);
+    // BRIDGE-18: a non-2xx is a terminal gateway error result (not a thrown
+    // exception), surfaced verbatim through the universal mapper.
+    assert.match(err.body ?? "", /Hermes request failed \(500\)/);
+    assert.match(err.body ?? "", /kaboom/);
     // No final response was posted for a failed run.
     assert.equal(bridge.linear.activities.some((a) => a.type === "response"), false);
 
-    const traced = bridge.logs.filter((l) => l.includes("cid=delivery-error-1"));
-    assert.ok(
-      traced.some((l) => l.includes("phase=turn_errored")),
-      "a failed turn should log turn_errored under the same cid",
-    );
+    // turn_errored is logged just after the error activity posts — wait for it.
+    const erroredLogged = (): boolean =>
+      bridge.logs.some(
+        (l) => l.includes("cid=delivery-error-1") && l.includes("phase=turn_errored"),
+      );
+    for (let i = 0; i < 50 && !erroredLogged(); i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.ok(erroredLogged(), "a failed turn should log turn_errored under the same cid");
   } finally {
     bridge.restore();
     await mock.close();
