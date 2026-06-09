@@ -208,6 +208,46 @@ test("tool-progress items surface with their arguments, once per call", async ()
   }
 });
 
+test("distinct commands all surface; an identical repeat coalesces", async () => {
+  const call = (id: string, name: string, args: object) => [
+    frame("response.output_item.added", {
+      output_index: 0,
+      item: { id, type: "function_call", name },
+    }),
+    frame("response.output_item.done", {
+      output_index: 0,
+      item: { id, type: "function_call", name, arguments: JSON.stringify(args) },
+    }),
+  ];
+  const frames = [
+    frame("response.created", { response: { id: "resp_m" } }),
+    ...call("fc_1", "terminal", { command: "ls ~" }),
+    ...call("fc_2", "terminal", { command: "ls /" }), // different args → distinct
+    ...call("fc_3", "terminal", { command: "ls ~" }), // identical to fc_1 but not adjacent → its own thought
+    ...call("fc_4", "read_file", { path: "a.ts" }),
+    ...call("fc_5", "read_file", { path: "a.ts" }), // adjacent identical → coalesce ×2
+    frame("response.output_text.delta", { delta: "ok" }),
+    frame("response.completed", { response: { id: "resp_m" } }),
+  ];
+  const mock = await startMockHermes({ frames });
+  try {
+    const gateway = createHermesGateway({ url: mock.url, apiKey: "k" });
+    const { events } = await drain(gateway.runTurn(fakeApi, fakeCfg, turnInput()));
+    const thoughts = events
+      .filter((e) => e.type === "thought")
+      .map((e) => (e as { body: string }).body)
+      .filter((b) => b.startsWith("Running"));
+    assert.deepEqual(thoughts, [
+      "Running terminal: ls ~",
+      "Running terminal: ls /",
+      "Running terminal: ls ~",
+      "Running read_file: a.ts (×2)",
+    ]);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("streamed token deltas keep their whitespace (no per-chunk trim)", async () => {
   // Regression: each delta was run through a trimming reader, eating the spaces
   // between tokens ("на Railway" → "наRailway").

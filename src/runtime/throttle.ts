@@ -1,26 +1,19 @@
 /**
- * Activity-stream throttler — pure logic, no timers.
+ * Consecutive-duplicate coalescer for the intermediate-thought stream.
  *
- * Sits between a backend's intermediate-thought stream and the universal event
- * mapper. Hermes can fire dozens of tool-progress signals in a second; posting
- * each as a Linear `thought` would flood the activity feed. This coalesces that
- * burst into a sparse, readable feed:
+ * Sits between a backend's tool-progress stream and the universal event mapper.
+ * Every *distinct* thought is surfaced — so you see every unique tool command —
+ * while runs of the *same* thought collapse into one activity with a count
+ * (`reading file (×4)`), which is the only thing worth suppressing. There is no
+ * time window: nothing distinct is ever dropped or delayed waiting out a clock.
  *
- *   - Leading edge: the first thought after an idle gap emits immediately, so
- *     the session shows life without waiting out the window.
- *   - Minimum interval: at most one emission per `minIntervalMs` (default
- *     2500ms). Everything that arrives inside an open window is held as a single
- *     `pending` slot and emitted on the next push past the window — or at the
- *     final `flush()`.
- *   - Dedup: adjacent repeats of the same body coalesce into one thought with a
- *     count suffix (`reading file (×4)`).
+ * Mechanics: a new distinct thought flushes the previous one and becomes the
+ * held item; identical repeats just bump its count. The final held thought is
+ * released by `flush()`. (So a thought emits when the *next* distinct one
+ * arrives, or at flush — a one-step hold, which is what lets repeats coalesce.)
  *
- * Time is injected as a `now` argument on every call rather than read from the
- * clock, so the whole thing is deterministic table-test fodder. The real
- * gateway passes `Date.now()`.
+ * Pure logic, no timers — deterministic table-test fodder.
  */
-
-const DEFAULT_MIN_INTERVAL_MS = 2500;
 
 export interface ThrottleEmit {
   /** Render-ready thought body, carrying a `(×N)` suffix when coalesced. */
@@ -29,93 +22,52 @@ export interface ThrottleEmit {
   count: number;
 }
 
-export interface ThoughtThrottlerOptions {
-  minIntervalMs?: number;
-}
-
-interface PendingThought {
+interface HeldThought {
   key: string;
-  body: string;
   count: number;
 }
 
 export class ThoughtThrottler {
-  private readonly minInterval: number;
-  private lastEmitAt: number | null = null;
-  private pending: PendingThought | null = null;
+  private held: HeldThought | null = null;
   private cancelled = false;
 
-  constructor(options: ThoughtThrottlerOptions = {}) {
-    this.minInterval = options.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
-  }
-
   /**
-   * Feed one intermediate thought. Returns the emissions this push produces —
-   * zero (held as pending) or one (leading edge, or a flushed prior pending).
+   * Feed one intermediate thought. Returns the previous distinct thought when
+   * this one differs from it (zero or one emission); identical repeats coalesce
+   * and return nothing.
    */
-  push(body: string, now: number): ThrottleEmit[] {
+  push(body: string): ThrottleEmit[] {
     if (this.cancelled) return [];
     const key = body.trim();
     if (!key) return [];
 
+    if (this.held && this.held.key === key) {
+      this.held.count += 1;
+      return [];
+    }
+
     const emits: ThrottleEmit[] = [];
-
-    // A pending thought whose window has now elapsed flushes before we consider
-    // the newcomer — that keeps emissions ordered and ≥minInterval apart.
-    if (this.pending && this.windowElapsed(now)) {
-      emits.push(render(this.pending));
-      this.lastEmitAt = now;
-      this.pending = null;
-    }
-
-    if (this.pending) {
-      // Still inside the window: fold into the single pending slot. Adjacent
-      // repeats bump the count; a different thought replaces it (last wins).
-      if (this.pending.key === key) {
-        this.pending.count += 1;
-      } else {
-        this.pending = { key, body: key, count: 1 };
-      }
-      return emits;
-    }
-
-    if (this.windowElapsed(now)) {
-      // Idle long enough — emit on the leading edge.
-      this.lastEmitAt = now;
-      emits.push({ body: key, count: 1 });
-      return emits;
-    }
-
-    // Inside an open window with nothing pending yet — stash it.
-    this.pending = { key, body: key, count: 1 };
+    if (this.held) emits.push(render(this.held));
+    this.held = { key, count: 1 };
     return emits;
   }
 
-  /**
-   * Flush whatever is held. Always emits the final pending thought (AC: the last
-   * event is never dropped). No-op after `cancel()`.
-   */
-  flush(now?: number): ThrottleEmit[] {
-    if (this.cancelled || !this.pending) return [];
-    const emit = render(this.pending);
-    this.pending = null;
-    if (typeof now === "number") this.lastEmitAt = now;
+  /** Release the final held thought. No-op when empty or after `cancel()`. */
+  flush(): ThrottleEmit[] {
+    if (this.cancelled || !this.held) return [];
+    const emit = render(this.held);
+    this.held = null;
     return [emit];
   }
 
-  /** Drop anything pending and emit nothing further (used on abort). */
+  /** Drop anything held and emit nothing further (used on abort). */
   cancel(): void {
     this.cancelled = true;
-    this.pending = null;
-  }
-
-  private windowElapsed(now: number): boolean {
-    return this.lastEmitAt === null || now - this.lastEmitAt >= this.minInterval;
+    this.held = null;
   }
 }
 
-function render(pending: PendingThought): ThrottleEmit {
-  const body =
-    pending.count > 1 ? `${pending.body} (×${pending.count})` : pending.body;
-  return { body, count: pending.count };
+function render(held: HeldThought): ThrottleEmit {
+  const body = held.count > 1 ? `${held.key} (×${held.count})` : held.key;
+  return { body, count: held.count };
 }
