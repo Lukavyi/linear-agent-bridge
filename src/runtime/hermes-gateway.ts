@@ -125,6 +125,8 @@ export function createHermesGateway(
       let responseId: string | undefined;
       let lastResponseObject: unknown;
       let streamError: string | undefined;
+      // Tool items stream as added → arguments → done; emit one thought per call.
+      const emittedTools = new Set<string>();
 
       const handle = function* (sse: SseEvent): Generator<GatewayEvent> {
         const data = parseEventData(sse.data);
@@ -146,16 +148,27 @@ export function createHermesGateway(
             return;
           }
           case "response.output_text.delta": {
-            const delta = readString(readObject(data)?.delta);
+            // Append the delta VERBATIM — trimming each chunk would swallow the
+            // spaces between streamed tokens ("на Railway" → "наRailway").
+            const delta = readRawString(readObject(data)?.delta);
             if (delta) replyBuf += delta;
             return;
           }
           case "response.output_item.added":
           case "response.output_item.done": {
-            const label = toolProgressLabel(readObject(data)?.item);
-            if (label && sse.event === "response.output_item.added") {
-              yield* emitThoughts(throttler.push(label, now()));
+            const dataObj = readObject(data);
+            const item = readObject(dataObj?.item);
+            if (!item || readString(item.type) !== "function_call") return;
+            const key = toolItemKey(item, dataObj);
+            if (emittedTools.has(key)) return;
+            // Arguments arrive after `added`; wait for them so the thought shows
+            // the actual command, not a bare "Running terminal".
+            if (sse.event === "response.output_item.added" && !toolArgsPresent(item)) {
+              return;
             }
+            emittedTools.add(key);
+            const label = toolCallLabel(item);
+            if (label) yield* emitThoughts(throttler.push(label, now()));
             return;
           }
           case "hermes.tool.progress": {
@@ -218,23 +231,107 @@ function* emitThoughts(emits: { body: string }[]): Generator<GatewayEvent> {
   }
 }
 
+/** Max characters of an argument summary surfaced in a progress thought. */
+const ARG_SUMMARY_LIMIT = 160;
+// Argument keys, in priority order, that best describe what a tool call is doing.
+const ARG_SUMMARY_KEYS = [
+  "command",
+  "cmd",
+  "script",
+  "path",
+  "file",
+  "file_path",
+  "filepath",
+  "query",
+  "q",
+  "url",
+  "pattern",
+  "expression",
+  "code",
+  "input",
+];
+
 /**
- * Human-readable label for a Responses-API output item that represents tool
- * activity. Returns `undefined` for non-tool items (e.g. plain `message`).
+ * Human-readable label for a `function_call` output item, including a short
+ * summary of its arguments so the thought reads "Running terminal: npm test"
+ * rather than a bare "Running terminal". Returns `undefined` for non-tool items.
  */
-export function toolProgressLabel(item: unknown): string | undefined {
+export function toolCallLabel(item: unknown): string | undefined {
   const obj = readObject(item);
-  if (!obj) return undefined;
-  const type = readString(obj.type);
-  if (type === "function_call") {
-    const name = readString(obj.name) ?? "tool";
-    return `Running ${name}`;
+  if (!obj || readString(obj.type) !== "function_call") return undefined;
+  const name = readString(obj.name) ?? "tool";
+  const summary = summarizeToolArgs(obj.arguments);
+  return summary ? `Running ${name}: ${summary}` : `Running ${name}`;
+}
+
+/** True once a `function_call` item carries non-empty arguments. */
+export function toolArgsPresent(item: Record<string, unknown>): boolean {
+  const parsed = parseToolArgs(item.arguments);
+  if (parsed === undefined) return false;
+  if (typeof parsed === "string") return parsed.trim().length > 0;
+  return Object.keys(parsed).length > 0;
+}
+
+/** A short, single-line summary of a tool call's arguments. */
+export function summarizeToolArgs(raw: unknown): string | undefined {
+  const parsed = parseToolArgs(raw);
+  if (parsed === undefined) return undefined;
+  if (typeof parsed === "string") return truncate(collapse(parsed));
+
+  for (const key of ARG_SUMMARY_KEYS) {
+    const value = parsed[key];
+    if (typeof value === "string" && value.trim()) {
+      return truncate(collapse(value));
+    }
   }
-  if (type === "function_call_output") {
-    const name = readString(obj.name);
-    return name ? `Finished ${name}` : "Tool finished";
+  const keys = Object.keys(parsed);
+  if (keys.length === 0) return undefined;
+  try {
+    return truncate(collapse(JSON.stringify(parsed)));
+  } catch {
+    return undefined;
   }
-  return undefined;
+}
+
+/** Arguments may arrive as a JSON string or an already-parsed object. */
+function parseToolArgs(
+  raw: unknown,
+): string | Record<string, unknown> | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return undefined;
+    try {
+      const parsed = JSON.parse(trimmed);
+      const obj = readObject(parsed);
+      return obj ?? trimmed;
+    } catch {
+      return trimmed;
+    }
+  }
+  return readObject(raw);
+}
+
+/** Stable per-call key so a tool call emits exactly one thought. */
+function toolItemKey(
+  item: Record<string, unknown>,
+  data: Record<string, unknown> | undefined,
+): string {
+  return (
+    readString(item.id) ??
+    readString(item.call_id) ??
+    `idx:${readString(data?.output_index) ?? String(data?.output_index ?? item.name ?? "0")}`
+  );
+}
+
+function collapse(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function truncate(value: string): string {
+  return value.length > ARG_SUMMARY_LIMIT
+    ? `${value.slice(0, ARG_SUMMARY_LIMIT - 1)}…`
+    : value;
 }
 
 /** Label for Hermes' custom `hermes.tool.progress` SSE event. */
@@ -257,7 +354,9 @@ export function extractResponseText(response: unknown): string {
   const root = readObject(response);
   if (!root) return "";
 
-  const direct = readString(root.output_text);
+  // Read text verbatim (no per-part trim) so spacing across parts is preserved;
+  // the caller trims the assembled whole.
+  const direct = readRawString(root.output_text);
   if (direct) return direct;
 
   const texts: string[] = [];
@@ -268,12 +367,18 @@ export function extractResponseText(response: unknown): string {
       const partObj = readObject(part);
       const type = readString(partObj?.type);
       if (type === "output_text" || type === "text") {
-        const text = readString(partObj?.text);
+        const text = readRawString(partObj?.text);
         if (text) texts.push(text);
       }
     }
   }
   return texts.join("");
+}
+
+/** Like `readString` but WITHOUT trimming — for streamed text where edge
+ * whitespace is significant. Empty strings still read as undefined. */
+function readRawString(input: unknown): string | undefined {
+  return typeof input === "string" && input.length > 0 ? input : undefined;
 }
 
 function parseEventData(data: string): unknown {
