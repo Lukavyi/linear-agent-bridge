@@ -6,7 +6,8 @@ import { AddressInfo } from "node:net";
 import {
   createHermesGateway,
   extractResponseText,
-  toolProgressLabel,
+  summarizeToolArgs,
+  toolCallLabel,
 } from "./hermes-gateway.js";
 import type {
   GatewayEvent,
@@ -161,11 +162,23 @@ test("happy path: ack thought, streamed reply, final completion + continuationId
   }
 });
 
-test("tool-progress items surface as intermediate thoughts before the reply", async () => {
+test("tool-progress items surface with their arguments, once per call", async () => {
+  // added (no args yet) → done (args complete) must yield ONE thought carrying
+  // the command, not a bare "Running terminal".
   const frames = [
     frame("response.created", { response: { id: "resp_2" } }),
     frame("response.output_item.added", {
-      item: { type: "function_call", name: "read_file" },
+      output_index: 0,
+      item: { id: "fc_1", type: "function_call", name: "terminal" },
+    }),
+    frame("response.output_item.done", {
+      output_index: 0,
+      item: {
+        id: "fc_1",
+        type: "function_call",
+        name: "terminal",
+        arguments: JSON.stringify({ command: "ls ~" }),
+      },
     }),
     frame("response.output_text.delta", { delta: "Done." }),
     frame("response.completed", { response: { id: "resp_2" } }),
@@ -179,8 +192,39 @@ test("tool-progress items surface as intermediate thoughts before the reply", as
     const thoughts = events
       .filter((e) => e.type === "thought")
       .map((e) => (e as { body: string }).body);
-    assert.ok(thoughts.includes("Running read_file"), JSON.stringify(thoughts));
+    assert.ok(
+      thoughts.includes("Running terminal: ls ~"),
+      JSON.stringify(thoughts),
+    );
+    // Exactly one tool thought for the one call (no added+done double-post).
+    assert.equal(
+      thoughts.filter((t) => t.startsWith("Running terminal")).length,
+      1,
+      JSON.stringify(thoughts),
+    );
     assert.equal(result.reply, "Done.");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("streamed token deltas keep their whitespace (no per-chunk trim)", async () => {
+  // Regression: each delta was run through a trimming reader, eating the spaces
+  // between tokens ("на Railway" → "наRailway").
+  const frames = [
+    frame("response.created", { response: { id: "resp_ws" } }),
+    frame("response.output_text.delta", { delta: "Deploy on" }),
+    frame("response.output_text.delta", { delta: " Railway" }),
+    frame("response.output_text.delta", { delta: " now" }),
+    frame("response.completed", { response: { id: "resp_ws" } }),
+  ];
+  const mock = await startMockHermes({ frames });
+  try {
+    const gateway = createHermesGateway({ url: mock.url, apiKey: "k" });
+    const { result } = await drain(
+      gateway.runTurn(fakeApi, fakeCfg, turnInput()),
+    );
+    assert.equal(result.reply, "Deploy on Railway now");
   } finally {
     await mock.close();
   }
@@ -305,17 +349,36 @@ test("requires HERMES_URL and HERMES_API_KEY", () => {
   );
 });
 
-test("toolProgressLabel maps function_call items and ignores plain messages", () => {
+test("toolCallLabel appends an argument summary and ignores non-tool items", () => {
   assert.equal(
-    toolProgressLabel({ type: "function_call", name: "search" }),
+    toolCallLabel({ type: "function_call", name: "search", arguments: "" }),
     "Running search",
   );
   assert.equal(
-    toolProgressLabel({ type: "function_call_output", name: "search" }),
-    "Finished search",
+    toolCallLabel({
+      type: "function_call",
+      name: "terminal",
+      arguments: JSON.stringify({ command: "npm test" }),
+    }),
+    "Running terminal: npm test",
   );
-  assert.equal(toolProgressLabel({ type: "message" }), undefined);
-  assert.equal(toolProgressLabel(null), undefined);
+  assert.equal(toolCallLabel({ type: "function_call_output", name: "x" }), undefined);
+  assert.equal(toolCallLabel({ type: "message" }), undefined);
+  assert.equal(toolCallLabel(null), undefined);
+});
+
+test("summarizeToolArgs prefers descriptive keys, tolerates strings and junk", () => {
+  assert.equal(summarizeToolArgs(JSON.stringify({ path: "src/x.ts" })), "src/x.ts");
+  assert.equal(summarizeToolArgs(JSON.stringify({ query: "hello   world" })), "hello world");
+  assert.equal(summarizeToolArgs({ command: "ls -la" }), "ls -la");
+  assert.equal(summarizeToolArgs("raw string command"), "raw string command");
+  assert.equal(summarizeToolArgs(JSON.stringify({ foo: 1 })), '{"foo":1}');
+  assert.equal(summarizeToolArgs(""), undefined);
+  assert.equal(summarizeToolArgs(undefined), undefined);
+  // Long values are truncated with an ellipsis.
+  const long = "x".repeat(300);
+  const summary = summarizeToolArgs({ command: long }) ?? "";
+  assert.ok(summary.length <= 160 && summary.endsWith("…"), `len=${summary.length}`);
 });
 
 test("extractResponseText reads output_text and the message output array", () => {
