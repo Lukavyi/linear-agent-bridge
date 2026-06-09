@@ -31,6 +31,27 @@ test("maps a thought to a thought activity and drops empty ones", () => {
   );
 });
 
+test("maps an error event to an error activity", () => {
+  assert.deepEqual(
+    mapGatewayEventToActivity({ type: "error", body: "  Hermes request failed (500)  " }),
+    { type: "error", body: "Hermes request failed (500)" },
+  );
+});
+
+test("maps an empty error event to the no-reply error activity", () => {
+  assert.deepEqual(
+    mapGatewayEventToActivity({ type: "error", body: "   " }),
+    { type: "error", body: NO_REPLY_MESSAGE },
+  );
+});
+
+test("drops an unknown event type without crashing", () => {
+  assert.equal(
+    mapGatewayEventToActivity({ type: "mystery", body: "x" } as never),
+    null,
+  );
+});
+
 test("maps an action with optional parameter and result", () => {
   assert.deepEqual(
     mapGatewayEventToActivity({

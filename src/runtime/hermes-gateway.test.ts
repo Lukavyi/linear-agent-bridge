@@ -349,20 +349,24 @@ test("falls back to the completed response object when no deltas arrive", async 
   }
 });
 
-test("a non-2xx response aborts the turn", async () => {
-  const mock = await startMockHermes({ status: 500, errorBody: { error: "boom" } });
+test("a non-2xx response ends the turn as a terminal error result", async () => {
+  const mock = await startMockHermes({
+    status: 500,
+    errorBody: { error: { message: "model overloaded" } },
+  });
   try {
     const gateway = createHermesGateway({ url: mock.url, apiKey: "k" });
-    await assert.rejects(
-      drain(gateway.runTurn(fakeApi, fakeCfg, turnInput())),
-      /v1\/responses failed: 500/,
-    );
+    const { result } = await drain(gateway.runTurn(fakeApi, fakeCfg, turnInput()));
+    assert.equal(result.ok, false);
+    assert.equal(result.reply, "");
+    assert.match(result.error ?? "", /500/);
+    assert.match(result.error ?? "", /model overloaded/);
   } finally {
     await mock.close();
   }
 });
 
-test("a response.failed event surfaces as a thrown error", async () => {
+test("a response.failed event ends the turn as a terminal error result", async () => {
   const frames = [
     frame("response.created", { response: { id: "resp_5" } }),
     frame("response.failed", {
@@ -372,10 +376,63 @@ test("a response.failed event surfaces as a thrown error", async () => {
   const mock = await startMockHermes({ frames });
   try {
     const gateway = createHermesGateway({ url: mock.url, apiKey: "k" });
-    await assert.rejects(
-      drain(gateway.runTurn(fakeApi, fakeCfg, turnInput())),
-      /model exploded/,
+    const { events, result } = await drain(
+      gateway.runTurn(fakeApi, fakeCfg, turnInput()),
     );
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /model exploded/);
+    // No `completion` event is emitted on the error path.
+    assert.equal(events.some((e) => e.type === "completion"), false);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a mid-stream error event ends the turn as a terminal error result", async () => {
+  const frames = [
+    frame("response.created", { response: { id: "resp_6" } }),
+    frame("error", { message: "upstream timeout" }),
+  ];
+  const mock = await startMockHermes({ frames });
+  try {
+    const gateway = createHermesGateway({ url: mock.url, apiKey: "k" });
+    const { result } = await drain(gateway.runTurn(fakeApi, fakeCfg, turnInput()));
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /upstream timeout/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a bare OpenAI error object on a 200 stream ends the turn as an error", async () => {
+  // No `event:` line — just `data: {"error": {...}}` on an otherwise-200 stream.
+  const frames = [`data: ${JSON.stringify({ error: { message: "bad request" } })}\n\n`];
+  const mock = await startMockHermes({ frames });
+  try {
+    const gateway = createHermesGateway({ url: mock.url, apiKey: "k" });
+    const { result } = await drain(gateway.runTurn(fakeApi, fakeCfg, turnInput()));
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /bad request/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("unknown event types and tool-approval signals do not crash the run", async () => {
+  const frames = [
+    frame("response.created", { response: { id: "resp_7" } }),
+    frame("some.unknown.event", { whatever: true }),
+    frame("response.requires_action", { approval: "needed" }),
+    frame("response.output_text.delta", { delta: "done" }),
+    frame("response.completed", { response: { id: "resp_7" } }),
+  ];
+  const mock = await startMockHermes({ frames });
+  try {
+    const gateway = createHermesGateway({ url: mock.url, apiKey: "k" });
+    const { result } = await drain(gateway.runTurn(fakeApi, fakeCfg, turnInput()));
+    assert.equal(result.ok, true);
+    assert.equal(result.error, undefined);
+    assert.equal(result.reply, "done");
   } finally {
     await mock.close();
   }

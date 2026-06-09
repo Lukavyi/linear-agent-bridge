@@ -37,6 +37,10 @@ export function mapGatewayEventToActivity(
         ? { type: "response", body }
         : { type: "error", body: NO_REPLY_MESSAGE };
     }
+    case "error": {
+      const body = event.body.trim();
+      return { type: "error", body: body || NO_REPLY_MESSAGE };
+    }
     default:
       return null;
   }
