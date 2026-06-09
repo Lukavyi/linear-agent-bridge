@@ -40,8 +40,13 @@ export function logPhase(
 
 export type TracePhase =
   | "webhook_received"
+  | "webhook_rejected"
+  | "webhook_parsed"
+  | "webhook_ignored"
+  | "webhook_skipped"
   | "signature_verified"
   | "signature_rejected"
+  | "turn_enqueued"
   | "turn_started"
   | "gateway_event"
   | "activity_posted"
