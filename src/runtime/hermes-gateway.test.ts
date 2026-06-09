@@ -381,6 +381,83 @@ test("a response.failed event surfaces as a thrown error", async () => {
   }
 });
 
+test("aborting the turn stops the in-flight request before completion", async () => {
+  // Mock that opens the stream (one frame) then hangs — never sends
+  // `response.completed`. The only way the turn ends is the AbortSignal.
+  let serverSawClose = false;
+  const server = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+    });
+    res.write(frame("response.created", { response: { id: "resp_abort" } }));
+    req.on("close", () => {
+      serverSawClose = true;
+    });
+    // Intentionally never res.end() — the run can only terminate via abort.
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const controller = new AbortController();
+    const gateway = createHermesGateway({
+      url: `http://127.0.0.1:${port}`,
+      apiKey: "k",
+    });
+    const gen = gateway.runTurn(
+      fakeApi,
+      fakeCfg,
+      turnInput({ signal: controller.signal }),
+    );
+
+    // The immediate ack thought is yielded before the request is awaited.
+    const first = await gen.next();
+    assert.deepEqual(first.value, { type: "thought", body: "Working on it…" });
+
+    // Drive the stream in the background; abort once it is in-flight.
+    const events: GatewayEvent[] = [];
+    const drained = (async () => {
+      try {
+        for (;;) {
+          const next = await gen.next();
+          if (next.done) return { ok: true as const };
+          events.push(next.value);
+        }
+      } catch (error) {
+        return { ok: false as const, error };
+      }
+    })();
+
+    await new Promise((r) => setTimeout(r, 50));
+    controller.abort();
+
+    const outcome = await drained;
+    assert.equal(outcome.ok, false, "aborting must reject the run");
+    assert.equal(
+      (outcome.error as { name?: string })?.name,
+      "AbortError",
+      String(outcome.error),
+    );
+    // No terminal reply was produced from a canceled run.
+    assert.ok(
+      !events.some((e) => e.type === "completion"),
+      "a canceled run must not emit a completion",
+    );
+
+    // The aborted fetch closed the connection server-side.
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(
+      serverSawClose,
+      true,
+      "server should observe the dropped request",
+    );
+  } finally {
+    await new Promise<void>((done) => server.close(() => done()));
+  }
+});
+
 test("requires HERMES_URL and HERMES_API_KEY", () => {
   assert.throws(() => createHermesGateway({ url: "", apiKey: "k" }), /HERMES_URL/);
   assert.throws(

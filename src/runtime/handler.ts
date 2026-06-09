@@ -89,6 +89,8 @@ interface SessionRunState {
   nextRunId: number;
   activeRunId?: number;
   suppressedRunId?: number;
+  /** Aborts the in-flight backend request for `activeRunId` on cancel. */
+  activeController?: AbortController;
 }
 
 interface ActivityPostResult {
@@ -509,6 +511,11 @@ async function handleStopSignal(
   const state = getSessionRunState(trigger.sessionId);
   if (state.activeRunId !== undefined) {
     state.suppressedRunId = state.activeRunId;
+    // Actually stop the backend: aborting the in-flight HTTP request closes the
+    // connection so Hermes stops generating instead of running to completion
+    // with its output merely suppressed. Backends that ignore the signal
+    // (OpenClaw) are unaffected — their output stays suppressed as before.
+    state.activeController?.abort();
   }
   await postTerminalActivity(api, cfg, trigger, {
     type: "response",
@@ -539,6 +546,10 @@ async function executeTurn(
   const runId = state.nextRunId + 1;
   state.nextRunId = runId;
   state.activeRunId = runId;
+  // Per-run abort handle so an `agentSession.canceled` for THIS session stops
+  // THIS run's backend request without touching any other session.
+  const controller = new AbortController();
+  state.activeController = controller;
   const agentId = cfg.agentId ?? cfg.devAgentId ?? "main";
   const sessionKey = buildOpenClawSessionKey(agentId, trigger.sessionId);
   let runStartedAtMs = Date.now();
@@ -617,6 +628,7 @@ async function executeTurn(
       idempotencyKey: trigger.eventKey,
       extraSystemPrompt: buildExtraSystemPrompt(),
       timeoutMs: AGENT_TIMEOUT_MS,
+      signal: controller.signal,
       continuationId: priorContinuationId,
       issue: trigger.issueId
         ? {
@@ -714,6 +726,7 @@ async function executeTurn(
   } finally {
     if (state.activeRunId === runId) state.activeRunId = undefined;
     if (state.suppressedRunId === runId) state.suppressedRunId = undefined;
+    if (state.activeController === controller) state.activeController = undefined;
   }
 }
 
