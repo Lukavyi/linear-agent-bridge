@@ -31,7 +31,14 @@ import {
 } from "./session-resolver.js";
 import { isSelfAuthoredComment } from "./skip-filter.js";
 import { verifySignature } from "./validation.js";
-import { readGatewayHistory, runGatewayTurn } from "./gateway.js";
+import { readGatewayHistory } from "./gateway.js";
+import { createGateway } from "./backend.js";
+import { mapGatewayEventToActivity } from "./event-mapper.js";
+import type {
+  Gateway,
+  GatewayCompletionEvent,
+  GatewayResult,
+} from "./gateway-types.js";
 import {
   buildExtraSystemPrompt,
   buildTurnMessage,
@@ -87,6 +94,8 @@ interface ActivityPostResult {
 export function createLinearWebhook(
   api: OpenClawPluginApi,
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  const gateway = createGateway(api);
+  api.logger.info?.(`linear runtime: selected backend=${gateway.backend}`);
   return async (req, res) => {
     if (req.method !== "POST") {
       res.statusCode = 405;
@@ -138,7 +147,7 @@ export function createLinearWebhook(
     res.end(JSON.stringify({ ok: true }));
 
     queueMicrotask(() => {
-      processWebhook(api, cfg, enrichedPayload, trigger).catch((error) => {
+      processWebhook(api, cfg, enrichedPayload, trigger, gateway).catch((error) => {
         api.logger.warn?.(
           `linear runtime webhook error: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -152,6 +161,7 @@ async function processWebhook(
   cfg: PluginConfig,
   payload: Record<string, unknown>,
   initialTrigger: LinearTrigger | null,
+  gateway: Gateway,
 ): Promise<void> {
   const kind = readString(payload.type) ?? "";
   if (
@@ -256,7 +266,7 @@ async function processWebhook(
   }
 
   enqueueSessionTurn(trigger.sessionId, async () => {
-    await executeTurn(api, cfg, trigger);
+    await executeTurn(api, cfg, trigger, gateway);
   });
 }
 
@@ -492,8 +502,12 @@ async function executeTurn(
   api: OpenClawPluginApi,
   cfg: PluginConfig,
   inputTrigger: LinearTrigger,
+  gateway: Gateway,
 ): Promise<void> {
   let trigger = await hydrateTriggerPromptFromCommentHint(inputTrigger);
+  api.logger.info?.(
+    `linear runtime: handling session=${trigger.sessionId} backend=${gateway.backend}`,
+  );
   if (!inputTrigger.prompt.trim() && trigger.prompt.trim()) {
     api.logger.info?.(
       `linear runtime: hydrated missing prompt from comment hint session=${trigger.sessionId}`,
@@ -545,15 +559,45 @@ async function executeTurn(
       loadIssueCommentContext(api, cfg, trigger),
     ]);
     runStartedAtMs = Date.now();
-    const result = await runGatewayTurn(api, cfg, {
+    const run = gateway.runTurn(api, cfg, {
       agentId,
       sessionKey,
       label: buildLabel(trigger),
-      message: buildTurnMessage({ cfg, trigger, history, issueComments }),
+      prompt: buildTurnMessage({ cfg, trigger, history, issueComments }),
       idempotencyKey: trigger.eventKey,
       extraSystemPrompt: buildExtraSystemPrompt(),
       timeoutMs: AGENT_TIMEOUT_MS,
+      issue: trigger.issueId
+        ? {
+            id: trigger.issueId,
+            identifier: trigger.issueIdentifier,
+            title: trigger.issueTitle,
+            url: trigger.issueUrl,
+          }
+        : undefined,
     });
+
+    // Drain intermediate events (thought/action) live; defer the terminal
+    // completion until after the suppression check and tool-trace pass so the
+    // ordering of @Clawd's output is preserved exactly.
+    let completionEvent: GatewayCompletionEvent | undefined;
+    let result: GatewayResult | undefined;
+    for (;;) {
+      const next = await run.next();
+      if (next.done) {
+        result = next.value;
+        break;
+      }
+      const event = next.value;
+      if (event.type === "completion") {
+        completionEvent = event;
+        continue;
+      }
+      const activity = mapGatewayEventToActivity(event);
+      if (activity) {
+        await postActivity(api, cfg, trigger.sessionId, activity);
+      }
+    }
 
     if (state.suppressedRunId === runId) {
       api.logger.info?.(
@@ -562,22 +606,15 @@ async function executeTurn(
       return;
     }
 
-    api.logger.info?.(`linear runtime: raw gateway result ${safePreview(result)}`);
+    api.logger.info?.(`linear runtime: raw gateway result ${safePreview(result?.raw)}`);
     await maybePostToolTrace(api, cfg, trigger.sessionId, sessionKey, runStartedAtMs);
-    const reply = extractVisibleReply(result);
-    if (!reply) {
-      await postTerminalActivity(api, cfg, trigger, {
-        type: "error",
-        body:
-          "This run finished without a visible reply. The model returned no publishable answer, so the bridge is marking the turn as failed.",
-      });
-      return;
-    }
 
-    await postTerminalActivity(api, cfg, trigger, {
-      type: "response",
-      body: reply,
-    });
+    const terminalEvent: GatewayCompletionEvent =
+      completionEvent ?? { type: "completion", body: result?.reply ?? "" };
+    const terminalActivity = mapGatewayEventToActivity(terminalEvent);
+    if (terminalActivity) {
+      await postTerminalActivity(api, cfg, trigger, terminalActivity);
+    }
   } catch (error) {
     if (state.suppressedRunId === runId) {
       api.logger.info?.(
@@ -895,39 +932,6 @@ function buildStopText(trigger: LinearTrigger): string {
     return `Stop request received. I will not continue the current run for ${target}.`;
   }
   return "Stop request received. I will not continue the current run.";
-}
-
-function extractVisibleReply(result: unknown): string {
-  const root = readObject(result);
-  if (!root) return "";
-  const payloads = readArray(readObject(root.result)?.payloads);
-  const parts: string[] = [];
-  const seenMedia = new Set<string>();
-
-  for (const entry of payloads) {
-    const item = readObject(entry);
-    if (!item) continue;
-    const text = readString(item.text);
-    if (text) parts.push(text);
-    const directMedia = readString(item.mediaUrl);
-    if (directMedia && !seenMedia.has(directMedia)) {
-      seenMedia.add(directMedia);
-      parts.push(`Media: ${directMedia}`);
-    }
-    const mediaUrls = readArray(item.mediaUrls);
-    for (const mediaUrl of mediaUrls) {
-      const value = readString(mediaUrl);
-      if (value && !seenMedia.has(value)) {
-        seenMedia.add(value);
-        parts.push(`Media: ${value}`);
-      }
-    }
-  }
-
-  const reply = parts.join("\n\n").trim();
-  if (!reply) return "";
-  if (/\bNO_REPLY\b/i.test(reply)) return "";
-  return reply;
 }
 
 function safePreview(value: unknown): string {

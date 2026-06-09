@@ -41,7 +41,11 @@ src/
     handler.ts          — createLinearWebhook() and session turn execution
     payload.ts          — webhook normalization and trigger extraction
     prompt.ts           — chat-first/task-mode prompt shaping
-    gateway.ts          — OpenClaw gateway invocation
+    gateway-types.ts    — Gateway interface, GatewayTurnInput/Event/Result
+    backend.ts          — selectBackend(BACKEND env) + createGateway() selector
+    openclaw-gateway.ts — OpenClawGateway: wraps gateway.ts behind the interface
+    event-mapper.ts     — universal GatewayEvent → Linear activity payload mapper
+    gateway.ts          — low-level OpenClaw gateway transport (callGateway)
     session-resolver.ts — comment webhook session lookup + fallback cache
     issue-policy.ts     — issue start/delegate policy on session create
     skip-filter.ts      — self-authored comment detection
@@ -58,18 +62,22 @@ src/
 2. The runtime validates the signature, rejects stale payloads, and responds `202` immediately.
 3. It normalizes the native Agent Session payload and resolves the session ID for comment follow-ups when needed.
 4. It posts an immediate visible `thought` activity so the user sees a fast acknowledgement.
-5. It runs one OpenClaw turn against a stable session key.
-6. It publishes exactly one final Linear `response` or `error`.
+5. It selects a backend `Gateway` (from `BACKEND`, default `openclaw`) and runs one turn against a stable session key.
+6. It maps the gateway's `GatewayEvent` stream through the universal event mapper and publishes exactly one final Linear `response` or `error`.
 
 ### Key patterns
 
 - **callLinear()** in `linear-client.ts` — single gateway for all Linear GraphQL calls
+- **Gateway abstraction** — `runtime/backend.ts` selects a `Gateway` (`OpenClawGateway` today, Hermes/others later) by the `BACKEND` env var; the handler is backend-agnostic and runs `gateway.runTurn()`
+- **Universal event mapper** — `runtime/event-mapper.ts` is the only place activity payloads are built from gateway output; OpenClaw emits a single `completion` event, streaming backends emit `thought`/`action` events too
 - **Persistent session identity** — one Linear session maps to one OpenClaw session key
 - **Immediate visible ack** — `runtime/handler.ts` posts a visible `thought` before the agent turn completes
 - **Session ID resolution** — direct field first, then fallback lookup for comment webhooks
 - **No plugin-side API proxy** — do not reintroduce `/plugins/linear/api` unless the product direction changes
 
 ### Configuration
+
+**Environment:** `BACKEND` selects the agent backend (`openclaw` | `hermes`), defaults to `openclaw`, and fails fast on an unknown value. Each handled session logs its selected backend. The existing @Clawd deployment needs no new env to keep working.
 
 Defined in `openclaw.plugin.json`. Active runtime options:
 - `agentId` / `devAgentId`
