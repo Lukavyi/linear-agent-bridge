@@ -113,20 +113,33 @@ export function createLinearWebhook(
       return;
     }
 
-    const read = await readBody(req, MAX_BODY);
-    if (!read.ok) {
-      sendJson(res, read.status, { ok: false, error: read.error });
-      return;
-    }
-
+    // Log the instant Linear's request hits us — before reading the body — so a
+    // hung or truncated upload still leaves a greppable first line for the cid.
     const cid = resolveCorrelationId(req);
-    const receivedFields: Record<string, unknown> = { method: req.method };
+    const receivedFields: Record<string, unknown> = {
+      method: req.method,
+      url: req.url ?? undefined,
+      contentLength: readHeader(req, "content-length") || undefined,
+      delivery: readHeader(req, "linear-delivery") || undefined,
+      signed: readHeader(req, "linear-signature") ? "1" : "0",
+    };
     if (api.logger.debug) {
       receivedFields.headers = JSON.stringify(
         redactHeaders(req.headers as Record<string, unknown>),
       );
     }
     logPhase(api.logger, cid, "webhook_received", receivedFields);
+
+    const read = await readBody(req, MAX_BODY);
+    if (!read.ok) {
+      logPhase(api.logger, cid, "webhook_rejected", {
+        reason: "body_read_failed",
+        status: read.status,
+        error: read.error,
+      });
+      sendJson(res, read.status, { ok: false, error: read.error });
+      return;
+    }
 
     const cfg = normalizeCfg(api.pluginConfig);
     const signature = readHeader(req, "linear-signature");
@@ -144,6 +157,7 @@ export function createLinearWebhook(
     try {
       parsed = JSON.parse(read.body.toString("utf8"));
     } catch {
+      logPhase(api.logger, cid, "webhook_rejected", { reason: "invalid_json" });
       sendJson(res, 400, { ok: false, error: "Invalid JSON" });
       return;
     }
@@ -152,9 +166,21 @@ export function createLinearWebhook(
     const delivery = readHeader(req, "linear-delivery");
     const enrichedPayload = delivery ? { ...payload, linearDelivery: delivery } : payload;
     const trigger = parseLinearTrigger(enrichedPayload);
+    logPhase(api.logger, cid, "webhook_parsed", {
+      type: readString(payload.type) || undefined,
+      action: readString(payload.action) || trigger?.action,
+      source: trigger?.source,
+      session: trigger?.sessionId,
+      issue: trigger?.issueIdentifier,
+      signal: trigger?.signal,
+    });
     if (trigger?.webhookTimestamp) {
       const ageMs = Math.abs(Date.now() - trigger.webhookTimestamp);
       if (ageMs > WEBHOOK_STALE_MS) {
+        logPhase(api.logger, cid, "webhook_rejected", {
+          reason: "stale",
+          ageMs,
+        });
         res.statusCode = 401;
         res.end("Stale webhook");
         return;
@@ -189,7 +215,7 @@ async function processWebhook(
     kind === "OAuthApp" ||
     kind === "AppUserNotification"
   ) {
-    api.logger.info?.(`linear runtime: ignored ${kind}`);
+    logPhase(api.logger, cid, "webhook_ignored", { reason: "type", type: kind });
     return;
   }
 
@@ -205,7 +231,7 @@ async function processWebhook(
       }
     }
     if (selfAuthored && !allowArtificialRootBootstrap) {
-      api.logger.info?.("linear runtime: skipped self-authored Comment webhook");
+      logPhase(api.logger, cid, "webhook_skipped", { reason: "self_authored_comment" });
       return;
     }
   }
@@ -215,33 +241,39 @@ async function processWebhook(
   }
 
   if (!trigger) {
-    api.logger.info?.(
-      `linear runtime: ignored webhook type=${kind || "unknown"} action=${readString(payload.action) ?? ""}`,
-    );
+    logPhase(api.logger, cid, "webhook_ignored", {
+      reason: "no_trigger",
+      type: kind || "unknown",
+      action: readString(payload.action) || undefined,
+    });
     return;
   }
 
   if (shouldIgnoreNativeCommentTrigger(payload, trigger)) {
-    api.logger.info?.(
-      `linear runtime: ignored native comment trigger session=${trigger.sessionId} action=${trigger.action}`,
-    );
+    logPhase(api.logger, cid, "webhook_ignored", {
+      reason: "native_comment_trigger",
+      session: trigger.sessionId,
+      action: trigger.action,
+    });
     return;
   }
 
   const bootstrapCommentCandidate = isBootstrapCommentCandidate(payload, trigger);
   if (trigger.action === "created") {
     if (hasFreshSessionMarker(recentBootstrapCommentRunsAt, trigger.sessionId)) {
-      api.logger.info?.(
-        `linear runtime: skipped created bootstrap duplicate session=${trigger.sessionId}`,
-      );
+      logPhase(api.logger, cid, "webhook_skipped", {
+        reason: "created_bootstrap_duplicate",
+        session: trigger.sessionId,
+      });
       return;
     }
     markSessionMarker(recentSessionCreatedAt, trigger.sessionId);
   } else if (bootstrapCommentCandidate) {
     if (await shouldSkipBootstrapCommentDuplicate(api, trigger.sessionId)) {
-      api.logger.info?.(
-        `linear runtime: skipped bootstrap comment duplicate session=${trigger.sessionId}`,
-      );
+      logPhase(api.logger, cid, "webhook_skipped", {
+        reason: "bootstrap_comment_duplicate",
+        session: trigger.sessionId,
+      });
       return;
     }
     markSessionMarker(recentBootstrapCommentRunsAt, trigger.sessionId);
@@ -254,9 +286,11 @@ async function processWebhook(
           promptedDuplicateKey,
         )
       ) {
-        api.logger.info?.(
-          `linear runtime: skipped prompted duplicate session=${trigger.sessionId} source=${trigger.source}`,
-        );
+        logPhase(api.logger, cid, "webhook_skipped", {
+          reason: "prompted_duplicate",
+          session: trigger.sessionId,
+          source: trigger.source,
+        });
         return;
       }
     }
@@ -275,16 +309,28 @@ async function processWebhook(
   );
 
   if (hasRecentKey(recentEventKeys, trigger.eventKey)) {
-    api.logger.info?.(`linear runtime: skipped duplicate event ${trigger.eventKey}`);
+    logPhase(api.logger, cid, "webhook_skipped", {
+      reason: "duplicate_event",
+      eventKey: trigger.eventKey,
+      session: trigger.sessionId,
+    });
     return;
   }
   markRecentKey(recentEventKeys, trigger.eventKey);
 
   if (trigger.signal === "stop") {
+    logPhase(api.logger, cid, "turn_enqueued", {
+      session: trigger.sessionId,
+      kind: "stop",
+    });
     await handleStopSignal(api, cfg, trigger);
     return;
   }
 
+  logPhase(api.logger, cid, "turn_enqueued", {
+    session: trigger.sessionId,
+    action: trigger.action,
+  });
   enqueueSessionTurn(trigger.sessionId, async () => {
     await executeTurn(api, cfg, trigger, gateway, cid);
   });
