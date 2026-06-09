@@ -33,6 +33,13 @@ export interface PluginConfig {
   linearOauthClientSecret?: string;
   linearOauthRedirectUri?: string;
   linearTokenStorePath?: string;
+  /**
+   * Where the Hermes per-session continuation store lives (the file mapping a
+   * Linear agent session to its last Responses-API `response.id`). Defaults to a
+   * `hermes-continuations.json` beside the token store, so it lands on the same
+   * Railway Volume.
+   */
+  hermesContinuationStorePath?: string;
   repoByTeam?: Record<string, string>;
   repoByProject?: Record<string, string>;
   defaultDir?: string;
