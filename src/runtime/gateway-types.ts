@@ -30,6 +30,13 @@ export interface GatewayTurnInput {
   signal?: AbortSignal;
   /** Optional issue context for backends that consume it directly. */
   issue?: GatewayIssueContext;
+  /**
+   * Optional resume token from the previous turn of this session — the value a
+   * prior turn returned as `GatewayResult.continuationId`. Backends with
+   * server-side memory (Hermes' Responses API) replay it to continue the same
+   * conversation; others ignore it.
+   */
+  continuationId?: string;
 }
 
 /**
@@ -71,6 +78,13 @@ export interface GatewayResult {
   reply: string;
   /** Raw backend payload, retained for logging / tool-trace. */
   raw?: unknown;
+  /**
+   * Backend-provided token for resuming this conversation on the next turn.
+   * Hermes returns the Responses-API `response.id`; the runtime persists it per
+   * Linear session and feeds it back as `GatewayTurnInput.continuationId`.
+   * Backends with their own session memory (OpenClaw) leave it unset.
+   */
+  continuationId?: string;
 }
 
 export interface Gateway {
