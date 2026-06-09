@@ -16,15 +16,13 @@ import { ThoughtThrottler } from "./throttle.js";
  * `http://hermes-agent.railway.internal:8642`); `apiKey` is the Hermes
  * `API_SERVER_KEY`. `model` is the OpenAI-compatible model name Hermes expects
  * (default `hermes-agent`). `fetchImpl` is injectable so tests can run against
- * an in-process mock server. `now` is injectable so the throttler's timing is
- * deterministic under test.
+ * an in-process mock server.
  */
 export interface HermesGatewayConfig {
   url: string;
   apiKey: string;
   model: string;
   fetchImpl: typeof fetch;
-  now: () => number;
 }
 
 const ACK_THOUGHT = "Working on it…";
@@ -40,8 +38,9 @@ const DEFAULT_MODEL = "hermes-agent";
  *   - emits an immediate ack `thought` so the Linear session shows life;
  *   - surfaces tool-progress signals (`response.output_item.*` carrying
  *     `function_call` items, plus Hermes' custom `hermes.tool.progress`) as
- *     intermediate `thought`s, run through a {@link ThoughtThrottler} so a burst
- *     of tool calls can't flood Linear's feed;
+ *     intermediate `thought`s — every distinct tool command is posted; only an
+ *     identical command repeated back-to-back coalesces into one `(×N)` thought
+ *     (via {@link ThoughtThrottler});
  *   - accumulates assistant token deltas (`response.output_text.delta`) into the
  *     final visible reply, emitted as one terminal `completion`.
  *
@@ -58,7 +57,6 @@ export function createHermesGateway(
   const model =
     (config?.model ?? process.env.HERMES_MODEL ?? "").trim() || DEFAULT_MODEL;
   const fetchImpl = config?.fetchImpl ?? globalThis.fetch;
-  const now = config?.now ?? Date.now;
 
   if (!url) {
     throw new Error(
@@ -168,12 +166,12 @@ export function createHermesGateway(
             }
             emittedTools.add(key);
             const label = toolCallLabel(item);
-            if (label) yield* emitThoughts(throttler.push(label, now()));
+            if (label) yield* emitThoughts(throttler.push(label));
             return;
           }
           case "hermes.tool.progress": {
             const label = hermesToolProgressLabel(data);
-            if (label) yield* emitThoughts(throttler.push(label, now()));
+            if (label) yield* emitThoughts(throttler.push(label));
             return;
           }
           case "error":
