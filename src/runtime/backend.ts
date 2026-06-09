@@ -1,6 +1,7 @@
 import type { OpenClawPluginApi } from "../types.js";
 import type { BackendName, Gateway } from "./gateway-types.js";
 import { createOpenClawGateway } from "./openclaw-gateway.js";
+import { createHermesGateway } from "./hermes-gateway.js";
 
 const DEFAULT_BACKEND: BackendName = "openclaw";
 const KNOWN_BACKENDS: readonly BackendName[] = ["openclaw", "hermes"];
@@ -39,9 +40,7 @@ export function createGateway(
     case "openclaw":
       return createOpenClawGateway();
     case "hermes":
-      throw new Error(
-        'BACKEND="hermes" is selected but the Hermes gateway is not implemented yet.',
-      );
+      return createHermesGateway();
     default: {
       const exhaustive: never = backend;
       throw new Error(`Unhandled backend: ${String(exhaustive)}`);
