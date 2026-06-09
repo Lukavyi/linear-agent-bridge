@@ -162,6 +162,64 @@ test("happy path: ack thought, streamed reply, final completion + continuationId
   }
 });
 
+test("completes on response.completed without waiting for the socket to close", async () => {
+  // Regression for the seconds→minutes latency: the server streams a full reply
+  // ending in `response.completed`, then deliberately keeps the keep-alive
+  // socket OPEN (never res.end()). The run must still finish promptly off the
+  // terminal event rather than blocking on the socket close.
+  let serverSawClose = false;
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on("close", () => {
+      serverSawClose = true;
+    });
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+    });
+    res.write(frame("response.created", { response: { id: "resp_hang" } }));
+    res.write(frame("response.output_text.delta", { delta: "Hi there." }));
+    res.write(frame("response.completed", { response: { id: "resp_hang" } }));
+    // Intentionally never res.end(): the socket stays open. A run that waits for
+    // the close would hang here until an idle timeout.
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const gateway = createHermesGateway({
+      url: `http://127.0.0.1:${port}`,
+      apiKey: "k",
+    });
+    const finished = drain(gateway.runTurn(fakeApi, fakeCfg, turnInput()));
+    const outcome = await Promise.race([
+      finished.then((v) => ({ timedOut: false as const, ...v })),
+      new Promise<{ timedOut: true }>((r) =>
+        setTimeout(() => r({ timedOut: true }), 2000),
+      ),
+    ]);
+
+    assert.equal(
+      outcome.timedOut,
+      false,
+      "run must complete off response.completed, not block on socket close",
+    );
+    if (outcome.timedOut) return;
+    assert.equal(outcome.result.reply, "Hi there.");
+    assert.equal(outcome.result.continuationId, "resp_hang");
+    assert.deepEqual(outcome.events.at(-1), {
+      type: "completion",
+      body: "Hi there.",
+    });
+
+    // The gateway tore down the connection (cancel()) instead of leaking it.
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(serverSawClose, true, "gateway should release the socket");
+  } finally {
+    await new Promise<void>((done) => server.close(() => done()));
+  }
+});
+
 test("tool-progress items surface with their arguments, once per call", async () => {
   // added (no args yet) → done (args complete) must yield ONE thought carrying
   // the command, not a bare "Running terminal".

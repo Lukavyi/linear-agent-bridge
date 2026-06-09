@@ -123,6 +123,9 @@ export function createHermesGateway(
       let responseId: string | undefined;
       let lastResponseObject: unknown;
       let streamError: string | undefined;
+      // Set once a terminal response event arrives so the read loop can stop
+      // immediately instead of waiting for the server to close the socket.
+      let streamComplete = false;
       // Tool items stream as added → arguments → done; emit one thought per call.
       const emittedTools = new Set<string>();
 
@@ -142,6 +145,16 @@ export function createHermesGateway(
               streamError =
                 readString(readObject(responseObj?.error)?.message) ??
                 "Hermes reported response.failed";
+            }
+            // These three are terminal: no further deltas or items follow. Stop
+            // reading now rather than blocking on the socket close, which under
+            // keep-alive (and with an AbortSignal attached) can lag minutes.
+            if (
+              sse.event === "response.completed" ||
+              sse.event === "response.failed" ||
+              sse.event === "response.incomplete"
+            ) {
+              streamComplete = true;
             }
             return;
           }
@@ -189,15 +202,23 @@ export function createHermesGateway(
       };
 
       try {
-        for (;;) {
+        read: for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
           const chunk = textDecoder.decode(value, { stream: true });
-          for (const sse of decoder.push(chunk)) yield* handle(sse);
+          for (const sse of decoder.push(chunk)) {
+            yield* handle(sse);
+            if (streamComplete) break read;
+          }
         }
-        for (const sse of decoder.flush()) yield* handle(sse);
+        if (!streamComplete) {
+          for (const sse of decoder.flush()) yield* handle(sse);
+        }
       } finally {
-        reader.releaseLock?.();
+        // cancel() (not just releaseLock) tears down the underlying connection
+        // so the keep-alive socket is released immediately after a terminal
+        // event — releasing the lock alone would leave it open until idle.
+        await reader.cancel().catch(() => {});
       }
 
       // Flush any thought held inside the throttle window.
