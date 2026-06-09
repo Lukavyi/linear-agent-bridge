@@ -6,21 +6,21 @@ Full demo video: [`media/linear-agent-sessions-demo.mp4`](./media/linear-agent-s
 
 A bridge that maps each Linear Agent Session to its own persistent conversation on a backend agent runtime. Two backends are supported behind one `Gateway` abstraction:
 
-- **OpenClaw** — runs as `@Clawd`, the original backend.
-- **Hermes** ([NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)) — runs as `@Hermes`, talking to the Hermes `api_server`.
+- **OpenClaw** — the original backend.
+- **Hermes** ([NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)) — talks to the Hermes `api_server`.
 
 One Linear issue can contain many separate Agent Sessions, and each maps to a separate backend session key. That means you can create as many independent agent threads as you want inside the same issue without mixing their context.
 
-The same codebase powers both personas; you pick the backend per deployment with the `BACKEND` env var (`openclaw` | `hermes`). This repo is the bridge runtime itself — it is not a full infrastructure guide for every possible ingress setup.
+The same codebase powers both backends; you pick one per deployment with the `BACKEND` env var (`openclaw` | `hermes`). This repo is the bridge runtime itself — it is not a full infrastructure guide for every possible ingress setup.
 
 ## Backends
 
 The runtime talks to its backend through a single `Gateway` interface (`src/runtime/gateway-types.ts`). The `BACKEND` env var selects the implementation:
 
-| `BACKEND`  | Persona  | Gateway              | Talks to                                  |
-| ---------- | -------- | -------------------- | ----------------------------------------- |
-| `openclaw` | `@Clawd` | `OpenClawGateway`    | OpenClaw (plugin host or HTTP gateway)    |
-| `hermes`   | `@Hermes`| `HermesGateway`      | Hermes `api_server` (OpenAI-compatible)   |
+| `BACKEND`  | Gateway              | Talks to                                  |
+| ---------- | -------------------- | ----------------------------------------- |
+| `openclaw` | `OpenClawGateway`    | OpenClaw (plugin host or HTTP gateway)    |
+| `hermes`   | `HermesGateway`      | Hermes `api_server` (OpenAI-compatible)   |
 
 `BACKEND` defaults to `openclaw` when unset and fails fast on any unknown value. The selector lives in `src/runtime/backend.ts` — the one place to register a new backend's gateway.
 
@@ -30,8 +30,8 @@ Both gateways feed the same universal event mapper (`src/runtime/event-mapper.ts
 
 The bridge runs in one of two modes, sharing the same plugin core:
 
-- **As an OpenClaw plugin** (`index.ts`) — the OpenClaw host supplies the HTTP router, logger, and config, and registers the plugin's routes. Used by the `@Clawd` deployment.
-- **As a standalone HTTP server** (`server.ts`, started via `npm start` → `node dist/server.js`) — a minimal Node `http` server provides the same `OpenClawPluginApi` surface (router, console logger, config from env) and runs the plugin's `register()`. Used by the `@Hermes` deployment, which has no OpenClaw to host it. With `BACKEND=hermes` the plugin never touches OpenClaw, so nothing here depends on a local OpenClaw.
+- **As an OpenClaw plugin** (`index.ts`) — the OpenClaw host supplies the HTTP router, logger, and config, and registers the plugin's routes. Used by the OpenClaw deployment.
+- **As a standalone HTTP server** (`server.ts`, started via `npm start` → `node dist/server.js`) — a minimal Node `http` server provides the same `OpenClawPluginApi` surface (router, console logger, config from env) and runs the plugin's `register()`. Used by the Hermes deployment, which has no OpenClaw to host it. With `BACKEND=hermes` the plugin never touches OpenClaw, so nothing here depends on a local OpenClaw.
 
 ## What the bridge does
 
@@ -121,7 +121,7 @@ follow-up inside S2
 
 The bridge only requires a public HTTPS endpoint that ultimately reaches the registered routes. The backend runtime (OpenClaw or Hermes) sits behind the bridge and stays off the public internet.
 
-`@Clawd` (OpenClaw plugin):
+OpenClaw backend (plugin):
 
 ```text
 Linear
@@ -131,7 +131,7 @@ Linear
   -> linear-agent-bridge
 ```
 
-`@Hermes` (standalone server):
+Hermes backend (standalone server):
 
 ```text
 Linear
@@ -141,7 +141,7 @@ Linear
   -> Hermes api_server (private network)
 ```
 
-The two personas are intended to run as two separate deployments of this same codebase, differing only by env (`BACKEND`, OAuth app, webhook secret, backend URL). A standalone front proxy/tunnel is optional — useful for ingress logging or TLS separation, but the bridge does not depend on one.
+The two backends are intended to run as two separate deployments of this same codebase, differing only by env (`BACKEND`, OAuth app, webhook secret, backend URL). A standalone front proxy/tunnel is optional — useful for ingress logging or TLS separation, but the bridge does not depend on one.
 
 ## Configuration
 
