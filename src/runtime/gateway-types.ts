@@ -64,10 +64,23 @@ export interface GatewayCompletionEvent {
   body: string;
 }
 
+/**
+ * Terminal failure event. A backend yields nothing more after this — the mapper
+ * renders it as a Linear `error` activity, transitioning the session out of the
+ * thinking state. Distinct from an empty `completion`, which means "the model
+ * produced no publishable answer"; an `error` means "the run itself failed"
+ * (non-2xx, backend error object, or a mid-stream error chunk).
+ */
+export interface GatewayErrorEvent {
+  type: "error";
+  body: string;
+}
+
 export type GatewayEvent =
   | GatewayThoughtEvent
   | GatewayActionEvent
-  | GatewayCompletionEvent;
+  | GatewayCompletionEvent
+  | GatewayErrorEvent;
 
 /** Terminal metadata for a completed gateway turn. */
 export interface GatewayResult {
@@ -76,6 +89,12 @@ export interface GatewayResult {
   ok: boolean;
   /** The resolved visible reply (empty when none). */
   reply: string;
+  /**
+   * Set when the turn failed (non-2xx, backend error object, mid-stream error).
+   * Present implies `ok` is false and `reply` empty; the runtime renders it as a
+   * terminal Linear `error` activity instead of a `response`.
+   */
+  error?: string;
   /** Raw backend payload, retained for logging / tool-trace. */
   raw?: unknown;
   /**

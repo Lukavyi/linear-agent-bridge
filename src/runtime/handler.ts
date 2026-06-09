@@ -44,6 +44,7 @@ import { redactHeaders } from "./redact.js";
 import type {
   Gateway,
   GatewayCompletionEvent,
+  GatewayEvent,
   GatewayResult,
 } from "./gateway-types.js";
 import {
@@ -692,8 +693,12 @@ async function executeTurn(
 
     await maybePostToolTrace(api, cfg, trigger.sessionId, sessionKey, runStartedAtMs);
 
-    const terminalEvent: GatewayCompletionEvent =
-      completionEvent ?? { type: "completion", body: result?.reply ?? "" };
+    // A gateway-reported failure renders as a terminal `error` (via the same
+    // universal mapper), not a `response` — the session leaves the thinking
+    // state cleanly instead of hanging.
+    const terminalEvent: GatewayEvent = result?.error
+      ? { type: "error", body: result.error }
+      : completionEvent ?? { type: "completion", body: result?.reply ?? "" };
     const terminalActivity = mapGatewayEventToActivity(terminalEvent);
     if (terminalActivity) {
       await postTerminalActivity(api, cfg, trigger, terminalActivity);
@@ -702,10 +707,17 @@ async function executeTurn(
         terminal: true,
       });
     }
-    logPhase(api.logger, cid, "turn_completed", {
-      session: trigger.sessionId,
-      ok: result?.ok ?? false,
-    });
+    if (result?.error) {
+      logPhase(api.logger, cid, "turn_errored", {
+        session: trigger.sessionId,
+        error: result.error,
+      });
+    } else {
+      logPhase(api.logger, cid, "turn_completed", {
+        session: trigger.sessionId,
+        ok: result?.ok ?? false,
+      });
+    }
   } catch (error) {
     if (state.suppressedRunId === runId) {
       api.logger.info?.(

@@ -106,13 +106,17 @@ export function createHermesGateway(
         signal: input.signal,
       });
 
+      // A non-2xx response or a missing body ends the turn cleanly as a terminal
+      // error result — the runtime renders it as a Linear `error` activity so the
+      // session leaves the thinking state instead of hanging. (Network-level
+      // failures and aborts still throw and are handled by the runtime's catch.)
       if (!res.ok) {
-        throw new Error(
-          `Hermes POST /v1/responses failed: ${res.status} ${await safeText(res)}`,
+        return errorResult(
+          `Hermes request failed (${res.status}): ${describeErrorBody(await safeText(res))}`,
         );
       }
       if (!res.body) {
-        throw new Error("Hermes POST /v1/responses returned no response body.");
+        return errorResult("Hermes returned no response body.");
       }
 
       const throttler = new ThoughtThrottler();
@@ -140,8 +144,7 @@ export function createHermesGateway(
             if (responseObj) lastResponseObject = responseObj;
             if (sse.event === "response.failed") {
               streamError =
-                readString(readObject(responseObj?.error)?.message) ??
-                "Hermes reported response.failed";
+                errorMessageFrom(responseObj) ?? "Hermes reported response.failed";
             }
             return;
           }
@@ -177,14 +180,34 @@ export function createHermesGateway(
           case "error":
           case "response.error": {
             streamError =
-              readString(readObject(data)?.message) ??
-              (typeof sse.data === "string" ? sse.data : "Hermes stream error");
+              errorMessageFrom(data) ??
+              (typeof sse.data === "string" && sse.data.trim()
+                ? sse.data.trim()
+                : "Hermes stream error");
             return;
           }
-          default:
-            // Unknown event types are ignored (logged at debug, not fatal).
+          case "response.requires_action":
+          case "response.tool_approval":
+          case "approval_required": {
+            // Tool-approval / elicitation is out of scope (Level 3 UX): log and
+            // let the run continue rather than surfacing it as an elicitation.
+            api.logger.info?.(
+              `hermes gateway: tool-approval signal ignored (out of scope) event=${sse.event}`,
+            );
+            return;
+          }
+          default: {
+            // A bare OpenAI error object (`data: {"error": {...}}`, often with no
+            // `event:` line) is a terminal failure even on a 200 stream — surface
+            // it. Anything else is an unknown event: logged at debug, not fatal.
+            const message = errorMessageFrom(data);
+            if (message) {
+              streamError = message;
+              return;
+            }
             api.logger.debug?.(`hermes gateway: ignored SSE event=${sse.event}`);
             return;
+          }
         }
       };
 
@@ -204,7 +227,7 @@ export function createHermesGateway(
       yield* emitThoughts(throttler.flush());
 
       if (streamError) {
-        throw new Error(`Hermes stream error: ${streamError}`);
+        return errorResult(`Hermes run failed: ${streamError}`);
       }
 
       const reply = (replyBuf || extractResponseText(lastResponseObject)).trim();
@@ -226,6 +249,44 @@ export function createHermesGateway(
 function* emitThoughts(emits: { body: string }[]): Generator<GatewayEvent> {
   for (const emit of emits) {
     yield { type: "thought", body: emit.body };
+  }
+}
+
+/** A terminal failure result for the @Hermes backend. */
+function errorResult(message: string): GatewayResult {
+  return { backend: "hermes", ok: false, reply: "", error: message };
+}
+
+/**
+ * Pulls a human-readable message out of an OpenAI-shaped error payload —
+ * `{ error: { message } }`, `{ error: "..." }`, or a bare `{ message }`.
+ * Returns `undefined` when the object carries no error.
+ */
+function errorMessageFrom(data: unknown): string | undefined {
+  const obj = readObject(data);
+  if (!obj) return undefined;
+  if (obj.error !== undefined) {
+    const nested = readObject(obj.error);
+    return (
+      readString(nested?.message) ??
+      readString(obj.error) ??
+      "Hermes returned an error"
+    );
+  }
+  return readString(obj.message);
+}
+
+/**
+ * Best-effort one-line description of a non-2xx response body: the OpenAI error
+ * message when the body is JSON, otherwise the raw text. Empty → a placeholder.
+ */
+function describeErrorBody(body: string): string {
+  const trimmed = body.trim();
+  if (!trimmed) return "<no body>";
+  try {
+    return errorMessageFrom(JSON.parse(trimmed)) ?? trimmed;
+  } catch {
+    return trimmed;
   }
 }
 
