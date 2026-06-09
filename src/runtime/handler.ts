@@ -34,6 +34,8 @@ import { verifySignature } from "./validation.js";
 import { readGatewayHistory } from "./gateway.js";
 import { createGateway } from "./backend.js";
 import { mapGatewayEventToActivity } from "./event-mapper.js";
+import { logPhase, resolveCorrelationId } from "./trace.js";
+import { redactHeaders } from "./redact.js";
 import type {
   Gateway,
   GatewayCompletionEvent,
@@ -110,15 +112,25 @@ export function createLinearWebhook(
       return;
     }
 
+    const cid = resolveCorrelationId(req);
+    const receivedFields: Record<string, unknown> = { method: req.method };
+    if (api.logger.debug) {
+      receivedFields.headers = JSON.stringify(
+        redactHeaders(req.headers as Record<string, unknown>),
+      );
+    }
+    logPhase(api.logger, cid, "webhook_received", receivedFields);
+
     const cfg = normalizeCfg(api.pluginConfig);
     const signature = readHeader(req, "linear-signature");
-    if (
-      cfg.linearWebhookSecret &&
-      !verifySignature(cfg.linearWebhookSecret, signature, read.body)
-    ) {
-      res.statusCode = 401;
-      res.end("Unauthorized");
-      return;
+    if (cfg.linearWebhookSecret) {
+      if (!verifySignature(cfg.linearWebhookSecret, signature, read.body)) {
+        logPhase(api.logger, cid, "signature_rejected");
+        res.statusCode = 401;
+        res.end("Unauthorized");
+        return;
+      }
+      logPhase(api.logger, cid, "signature_verified");
     }
 
     let parsed: unknown;
@@ -147,7 +159,7 @@ export function createLinearWebhook(
     res.end(JSON.stringify({ ok: true }));
 
     queueMicrotask(() => {
-      processWebhook(api, cfg, enrichedPayload, trigger, gateway).catch((error) => {
+      processWebhook(api, cfg, enrichedPayload, trigger, gateway, cid).catch((error) => {
         api.logger.warn?.(
           `linear runtime webhook error: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -162,6 +174,7 @@ async function processWebhook(
   payload: Record<string, unknown>,
   initialTrigger: LinearTrigger | null,
   gateway: Gateway,
+  cid: string,
 ): Promise<void> {
   const kind = readString(payload.type) ?? "";
   if (
@@ -266,7 +279,7 @@ async function processWebhook(
   }
 
   enqueueSessionTurn(trigger.sessionId, async () => {
-    await executeTurn(api, cfg, trigger, gateway);
+    await executeTurn(api, cfg, trigger, gateway, cid);
   });
 }
 
@@ -503,11 +516,15 @@ async function executeTurn(
   cfg: PluginConfig,
   inputTrigger: LinearTrigger,
   gateway: Gateway,
+  cid: string,
 ): Promise<void> {
   let trigger = await hydrateTriggerPromptFromCommentHint(inputTrigger);
-  api.logger.info?.(
-    `linear runtime: handling session=${trigger.sessionId} backend=${gateway.backend}`,
-  );
+  logPhase(api.logger, cid, "turn_started", {
+    session: trigger.sessionId,
+    backend: gateway.backend,
+    action: trigger.action,
+    issue: trigger.issueIdentifier,
+  });
   if (!inputTrigger.prompt.trim() && trigger.prompt.trim()) {
     api.logger.info?.(
       `linear runtime: hydrated missing prompt from comment hint session=${trigger.sessionId}`,
@@ -589,6 +606,7 @@ async function executeTurn(
         break;
       }
       const event = next.value;
+      logPhase(api.logger, cid, "gateway_event", { type: event.type });
       if (event.type === "completion") {
         completionEvent = event;
         continue;
@@ -596,6 +614,10 @@ async function executeTurn(
       const activity = mapGatewayEventToActivity(event);
       if (activity) {
         await postActivity(api, cfg, trigger.sessionId, activity);
+        logPhase(api.logger, cid, "activity_posted", {
+          type: activity.type,
+          terminal: false,
+        });
       }
     }
 
@@ -614,7 +636,15 @@ async function executeTurn(
     const terminalActivity = mapGatewayEventToActivity(terminalEvent);
     if (terminalActivity) {
       await postTerminalActivity(api, cfg, trigger, terminalActivity);
+      logPhase(api.logger, cid, "activity_posted", {
+        type: terminalActivity.type,
+        terminal: true,
+      });
     }
+    logPhase(api.logger, cid, "turn_completed", {
+      session: trigger.sessionId,
+      ok: result?.ok ?? false,
+    });
   } catch (error) {
     if (state.suppressedRunId === runId) {
       api.logger.info?.(
@@ -624,6 +654,10 @@ async function executeTurn(
     }
     await maybePostToolTrace(api, cfg, trigger.sessionId, sessionKey, runStartedAtMs);
     const message = error instanceof Error ? error.message : String(error);
+    logPhase(api.logger, cid, "turn_errored", {
+      session: trigger.sessionId,
+      error: message,
+    });
     await postTerminalActivity(api, cfg, trigger, {
       type: "error",
       body: `Agent run failed: ${message}`,

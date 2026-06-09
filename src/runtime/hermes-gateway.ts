@@ -1,5 +1,5 @@
 import type { OpenClawPluginApi, PluginConfig } from "../types.js";
-import { readObject, readString } from "../util.js";
+import { readArray, readObject, readString } from "../util.js";
 import type {
   Gateway,
   GatewayEvent,
@@ -11,41 +11,46 @@ import type {
  * Resolved connection settings for the Hermes `api_server`.
  *
  * `url` points at the private Railway service (e.g.
- * `http://hermes.railway.internal:8000`); `apiKey` is the Hermes
- * `API_SERVER_KEY`. `fetchImpl` is injectable so tests can run against an
- * in-process mock SSE server.
+ * `http://hermes-agent.railway.internal:8642`); `apiKey` is the Hermes
+ * `API_SERVER_KEY`. `model` is the OpenAI-compatible model name Hermes expects
+ * (default `hermes-agent`). `fetchImpl` is injectable so tests can run against
+ * an in-process mock server.
  */
 export interface HermesGatewayConfig {
   url: string;
   apiKey: string;
+  model: string;
   fetchImpl: typeof fetch;
 }
 
 const ACK_THOUGHT = "Working on it…";
+const DEFAULT_MODEL = "hermes-agent";
 
 /**
  * Minimal `HermesGateway` — the walking-skeleton backend for @Hermes.
  *
- * One turn = `POST /v1/runs` (Bearer auth + `X-Hermes-Session-Key` for session
- * continuity), an immediate ack `thought`, then a subscription to the run's SSE
- * event stream. On the terminal `completed` event it emits a single
- * `completion` carrying the final reply; an `error` event aborts the turn.
+ * Hermes' `api_server` is OpenAI-compatible, so one turn is a single
+ * `POST /v1/chat/completions` (Bearer auth) carrying the bridge-built prompt as
+ * the user message. The gateway emits an immediate ack `thought`, then the
+ * model's reply (`choices[0].message.content`) as one `completion`.
  *
- * Deliberately omits throttling, intermediate progress streaming,
- * cancellation, and rich error mapping — those are follow-up slices
- * (see BRIDGE-12). Intermediate events are accumulated only to recover the
- * final text when `completed` does not carry it inline.
+ * Non-streaming and stateless by design — the bridge already folds session
+ * history into the prompt. Intermediate tool-progress streaming and server-side
+ * session continuity (`/v1/responses` + `previous_response_id`) are follow-up
+ * slices; so are throttling, cancellation, and rich error mapping.
  */
 export function createHermesGateway(
   config?: Partial<HermesGatewayConfig>,
 ): Gateway {
   const url = normalizeBaseUrl(config?.url ?? process.env.HERMES_URL);
   const apiKey = (config?.apiKey ?? process.env.HERMES_API_KEY ?? "").trim();
+  const model =
+    (config?.model ?? process.env.HERMES_MODEL ?? "").trim() || DEFAULT_MODEL;
   const fetchImpl = config?.fetchImpl ?? globalThis.fetch;
 
   if (!url) {
     throw new Error(
-      'BACKEND="hermes" requires HERMES_URL (e.g. http://hermes.railway.internal:port).',
+      'BACKEND="hermes" requires HERMES_URL (e.g. http://hermes-agent.railway.internal:8642).',
     );
   }
   if (!apiKey) {
@@ -64,237 +69,74 @@ export function createHermesGateway(
       _cfg: PluginConfig,
       input: GatewayTurnInput,
     ): AsyncGenerator<GatewayEvent, GatewayResult, void> {
-      const runId = await startRun(fetchImpl, url, apiKey, input);
-      api.logger.info?.(
-        `hermes gateway: started run ${runId} session=${input.sessionKey}`,
-      );
-
       // Immediate ack so the Linear session shows life before the model speaks.
       yield { type: "thought", body: ACK_THOUGHT };
 
-      let accumulated = "";
-      let finalReply: string | undefined;
-      let lastEvent: unknown;
+      const messages: Array<{ role: string; content: string }> = [];
+      const system = input.extraSystemPrompt.trim();
+      if (system) messages.push({ role: "system", content: system });
+      messages.push({ role: "user", content: input.prompt });
 
-      for await (const sse of streamRunEvents(
-        fetchImpl,
-        url,
-        apiKey,
-        runId,
-        input.signal,
-      )) {
-        const data = parseEventData(sse.data);
-        lastEvent = data ?? sse.data;
-        const type = resolveEventType(sse.event, data);
+      const res = await fetchImpl(`${url}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({ model, messages, stream: false }),
+        signal: input.signal,
+      });
 
-        switch (type) {
-          case "text_delta":
-          case "token":
-          case "delta": {
-            accumulated += extractDelta(data);
-            break;
-          }
-          case "completed":
-          case "complete":
-          case "done": {
-            finalReply = extractFinalText(data) ?? accumulated;
-            break;
-          }
-          case "error":
-          case "failed": {
-            throw new Error(extractErrorMessage(data));
-          }
-          default: {
-            // Progress / tool_call / unknown — ignored in the skeleton, but
-            // logged so the live event taxonomy can be reverse-engineered.
-            api.logger.debug?.(
-              `hermes gateway: ignoring event type=${type ?? "<none>"}`,
-            );
-          }
-        }
-
-        if (finalReply !== undefined) break;
+      if (!res.ok) {
+        throw new Error(
+          `Hermes POST /v1/chat/completions failed: ${res.status} ${await safeText(res)}`,
+        );
       }
 
-      const reply = (finalReply ?? accumulated).trim();
+      const raw = await res.json().catch(() => undefined);
+      api.logger.debug?.(
+        `hermes gateway: chat.completion received session=${input.sessionKey}`,
+      );
+      const reply = extractChatReply(raw).trim();
       yield { type: "completion", body: reply };
       return {
         backend: "hermes",
         ok: Boolean(reply),
         reply,
-        raw: lastEvent,
+        raw,
       };
     },
   };
 }
 
-/** Starts a Hermes run and returns its `run_id`. */
-async function startRun(
-  fetchImpl: typeof fetch,
-  url: string,
-  apiKey: string,
-  input: GatewayTurnInput,
-): Promise<string> {
-  const metadata: Record<string, string> = {};
-  if (input.issue?.id) metadata.linear_issue_id = input.issue.id;
+/**
+ * Pulls the assistant reply from an OpenAI-compatible chat completion.
+ *
+ * `choices[0].message.content` is normally a string; some servers return an
+ * array of content parts, so text parts are concatenated defensively.
+ */
+export function extractChatReply(result: unknown): string {
+  const root = readObject(result);
+  if (!root) return "";
+  const firstChoice = readObject(readArray(root.choices)[0]);
+  const message = readObject(firstChoice?.message);
+  if (!message) return "";
 
-  const res = await fetchImpl(`${url}/v1/runs`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "X-Hermes-Session-Key": input.sessionKey,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({
-      prompt: input.prompt,
-      session_key: input.sessionKey,
-      metadata,
-    }),
-    signal: input.signal,
-  });
+  const directText = readString(message.content);
+  if (directText) return directText;
 
-  if (!res.ok) {
-    throw new Error(
-      `Hermes POST /v1/runs failed: ${res.status} ${await safeText(res)}`,
-    );
-  }
-
-  const body = readObject(await res.json().catch(() => undefined));
-  const runId = readString(body?.run_id) ?? readString(body?.id);
-  if (!runId) {
-    throw new Error("Hermes POST /v1/runs returned no run_id.");
-  }
-  return runId;
-}
-
-/** Opens the run's SSE stream and yields parsed `{ event, data }` blocks. */
-async function* streamRunEvents(
-  fetchImpl: typeof fetch,
-  url: string,
-  apiKey: string,
-  runId: string,
-  signal: AbortSignal | undefined,
-): AsyncGenerator<{ event?: string; data: string }> {
-  const res = await fetchImpl(
-    `${url}/v1/runs/${encodeURIComponent(runId)}/events`,
-    {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "text/event-stream",
-      },
-      signal,
-    },
-  );
-
-  if (!res.ok || !res.body) {
-    throw new Error(
-      `Hermes GET /v1/runs/${runId}/events failed: ${res.status} ${await safeText(res)}`,
-    );
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      // SSE events are separated by a blank line. Normalize CRLF first.
-      let sep: number;
-      buffer = buffer.replace(/\r\n/g, "\n");
-      while ((sep = buffer.indexOf("\n\n")) !== -1) {
-        const block = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        const parsed = parseSseBlock(block);
-        if (parsed) yield parsed;
-      }
+  const parts = readArray(message.content);
+  if (parts.length > 0) {
+    const texts: string[] = [];
+    for (const part of parts) {
+      const item = readObject(part);
+      const text = readString(item?.text);
+      if (text) texts.push(text);
     }
-    const tail = parseSseBlock(buffer.replace(/\r\n/g, "\n"));
-    if (tail) yield tail;
-  } finally {
-    reader.releaseLock?.();
+    return texts.join("");
   }
-}
-
-/** Parses one SSE block into its `event:` name and joined `data:` payload. */
-function parseSseBlock(
-  block: string,
-): { event?: string; data: string } | null {
-  let event: string | undefined;
-  const dataLines: string[] = [];
-  for (const rawLine of block.split("\n")) {
-    const line = rawLine.trimEnd();
-    if (!line || line.startsWith(":")) continue;
-    if (line.startsWith("event:")) {
-      event = line.slice("event:".length).trim();
-    } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice("data:".length).replace(/^ /, ""));
-    }
-  }
-  if (dataLines.length === 0 && event === undefined) return null;
-  return { event, data: dataLines.join("\n") };
-}
-
-function parseEventData(data: string): Record<string, unknown> | undefined {
-  const trimmed = data.trim();
-  if (!trimmed) return undefined;
-  try {
-    return readObject(JSON.parse(trimmed));
-  } catch {
-    return undefined;
-  }
-}
-
-function resolveEventType(
-  sseEvent: string | undefined,
-  data: Record<string, unknown> | undefined,
-): string | undefined {
-  return (
-    readString(data?.type)?.toLowerCase() ??
-    readString(data?.event)?.toLowerCase() ??
-    sseEvent?.toLowerCase()
-  );
-}
-
-function extractDelta(data: Record<string, unknown> | undefined): string {
-  return (
-    readString(data?.delta) ??
-    readString(data?.text) ??
-    readString(data?.content) ??
-    ""
-  );
-}
-
-function extractFinalText(
-  data: Record<string, unknown> | undefined,
-): string | undefined {
-  if (!data) return undefined;
-  const nested = readObject(data.result) ?? readObject(data.response);
-  return (
-    readString(data.text) ??
-    readString(data.output) ??
-    readString(data.content) ??
-    readString(data.message) ??
-    readString(data.reply) ??
-    readString(nested?.text) ??
-    readString(nested?.content) ??
-    readString(nested?.output)
-  );
-}
-
-function extractErrorMessage(
-  data: Record<string, unknown> | undefined,
-): string {
-  return (
-    readString(data?.message) ??
-    readString(data?.error) ??
-    readString(readObject(data?.error)?.message) ??
-    "Hermes run reported an error."
-  );
+  return "";
 }
 
 function normalizeBaseUrl(raw: string | undefined): string {
