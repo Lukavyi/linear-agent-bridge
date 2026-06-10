@@ -94,7 +94,7 @@ HERMES_API_KEY=<== hermes-agent API_SERVER_KEY>
 LINEAR_WEBHOOK_SECRET=<hermes app webhook secret>
 LINEAR_OAUTH_CLIENT_ID=<hermes actor=app client id>
 LINEAR_OAUTH_CLIENT_SECRET=<hermes actor=app client secret>
-LINEAR_OAUTH_REDIRECT_URI=https://bridge-hermes-production.up.railway.app/plugins/linear/oauth/callback
+LINEAR_OAUTH_REDIRECT_URI=https://<bridge-hermes-domain>/plugins/linear/oauth/callback
 LINEAR_TOKEN_STORE_PATH=/data/linear-tokens.json
 AGENT_ID=<agent id>
 
