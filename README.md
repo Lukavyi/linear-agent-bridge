@@ -147,6 +147,8 @@ The two backends are intended to run as two separate deployments of this same co
 
 When running **as an OpenClaw plugin**, the config surface is defined in `openclaw.plugin.json`. When running **as a standalone server**, the same settings are read from environment variables (the server maps env keys onto the plugin config; see `server.ts`).
 
+> **Deploying on Railway?** See [`docs/env-schema.md`](docs/env-schema.md) for the full per-backend env reference and [`docs/runbook.md`](docs/runbook.md) for the dual-deploy provisioning, private-networking, token-at-rest, and teardown procedures.
+
 ### Backend selection
 
 - `BACKEND` - `openclaw` (default) or `hermes`
