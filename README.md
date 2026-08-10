@@ -85,6 +85,8 @@ For native Linear agent sessions, `AgentSessionEvent` is the canonical runtime t
 
 Comment webhooks may still be used for bootstrap/fallback lookup in edge cases, but normal comment events tied to an existing native agent session are ignored so one user turn cannot start a second run.
 
+For fresh dev↔verify handoffs, use the recipient-owned session endpoint design in [`docs/architecture/agent-to-agent-handoff.md`](./docs/architecture/agent-to-agent-handoff.md). It records the brief in a root comment and opens the recipient's session with the recipient app's Linear token.
+
 ## Session model on normal-human terms
 
 - One Linear `AgentSession` = one isolated backend session.
